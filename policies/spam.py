@@ -23,12 +23,16 @@ def parse(response: ModelResponse) -> ClassificationResult:
         d_level = int(d_match.group(1))
         binary_label = d_level >= 2
     
+    # Parsing was successful if we found INVALID keyword or at least one SP label
+    parsed_successfully = "INVALID" in text.upper() or d_match is not None or r_match is not None
+    
     metadata = {}
     
     return ClassificationResult(
         binary_label=binary_label,
         fine_grain_label=fine_grain,
         metadata=metadata,
-        model_response=response
+        model_response=response,
+        parsed_successfully=parsed_successfully
     )
 

@@ -10,6 +10,7 @@ class ClassificationResult:
     fine_grain_label: dict | str | None
     metadata: dict
     model_response: ModelResponse
+    parsed_successfully: bool  # True if parser successfully extracted meaningful information
 
 
 def _default_parse(response: ModelResponse) -> ClassificationResult:
@@ -36,13 +37,17 @@ def _default_parse(response: ModelResponse) -> ClassificationResult:
         else:
             fine_grain = sp_matches[0] if sp_matches else None
     
+    # Parsing was successful if we found INVALID keyword or SP labels
+    parsed_successfully = binary_label or (fine_grain is not None)
+    
     metadata = {}
     
     return ClassificationResult(
         binary_label=binary_label,
         fine_grain_label=fine_grain,
         metadata=metadata,
-        model_response=response
+        model_response=response,
+        parsed_successfully=parsed_successfully
     )
 
 
