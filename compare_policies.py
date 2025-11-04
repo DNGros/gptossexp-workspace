@@ -86,22 +86,78 @@ def format_metric_with_ci(mean, lower, upper, as_percent=False):
         return f"{mean_str} $\\pm$ {ci_range:.3f}"
 
 
+def run_model_evaluations(
+    sample_size: int,
+    use_cache: bool = True,
+    version: str = 'toxicchat0124',
+    split: str = 'test',
+    policy: str = 'toxic_chat_claude_1',
+):
+    """Run toxic chat evaluation for both base and safeguarded models.
+    
+    Returns:
+        tuple: (base_df, safeguard_df) DataFrames with evaluation results
+    """
+    base_df = run_toxic_chat_evaluation(
+        sample_size=sample_size,
+        version=version,
+        split=split,
+        policy=policy,
+        model=Model.GPT_OSS_20B.name,
+        use_cache=use_cache,
+    )
+    
+    safeguard_df = run_toxic_chat_evaluation(
+        sample_size=sample_size,
+        version=version,
+        split=split,
+        policy=policy,
+        model=Model.GPT_OSS_safeguarded_20B.name,
+        use_cache=use_cache,
+    )
+    
+    return base_df, safeguard_df
+
+
+def run_policy_evaluations(
+    sample_size: int,
+    use_cache: bool = True,
+    version: str = 'toxicchat0124',
+    split: str = 'test',
+    policies: list = None,
+):
+    """Run toxic chat evaluation for multiple policies on both models.
+    
+    Returns:
+        dict: {policy_name: (base_df, safeguard_df)} for each policy
+    """
+    if policies is None:
+        policies = ['toxic_chat_claude_1', 'toxic_simple']
+    
+    results = {}
+    for policy in policies:
+        base_df, safeguard_df = run_model_evaluations(
+            sample_size=sample_size,
+            use_cache=use_cache,
+            version=version,
+            split=split,
+            policy=policy,
+        )
+        results[policy] = (base_df, safeguard_df)
+    
+    return results
+
+
 def run_all_policies(
     sample_size: int = 300,
     use_cache: bool = True,
 ):
-    dfs = []
-    for model in [Model.GPT_OSS_20B, Model.GPT_OSS_safeguarded_20B]:
-        df = run_toxic_chat_evaluation(
-            sample_size=sample_size,
-            version='toxicchat0124',
-            split='test',
-            policy='toxic_chat_claude_1',
-            model=model.name,
-            use_cache=use_cache,
-        )
-        dfs.append(df)
-    return pd.concat(dfs)
+    """Run evaluations for both models and concatenate results."""
+    base_df, safeguard_df = run_model_evaluations(
+        sample_size=sample_size,
+        use_cache=use_cache,
+    )
+    return pd.concat([base_df, safeguard_df])
 
 
 def generate_comparison_table(sample_size: int = 1000, use_cache: bool = True, n_bootstrap: int = 1000):
@@ -111,33 +167,28 @@ def generate_comparison_table(sample_size: int = 1000, use_cache: bool = True, n
         tuple: (rows, latex_table) where rows is the data structure and latex_table is the formatted LaTeX
     """
     
-    # Run evaluations for both models
-    base_df = run_toxic_chat_evaluation(
+    # Run evaluations for all policies
+    policy_results = run_policy_evaluations(
         sample_size=sample_size,
-        version='toxicchat0124',
-        split='test',
-        policy='toxic_chat_claude_1',
-        model=Model.GPT_OSS_20B.name,
         use_cache=use_cache,
+        policies=['toxic_chat_claude_1', 'toxic_simple']
     )
     
-    safeguard_df = run_toxic_chat_evaluation(
-        sample_size=sample_size,
-        version='toxicchat0124',
-        split='test',
-        policy='toxic_chat_claude_1',
-        model=Model.GPT_OSS_safeguarded_20B.name,
-        use_cache=use_cache,
-    )
-    
-    # Calculate metrics for each model
-    base_metrics = calculate_metrics_with_ci(base_df, n_bootstrap=n_bootstrap)
-    safeguard_metrics = calculate_metrics_with_ci(safeguard_df, n_bootstrap=n_bootstrap)
+    # Policy display names
+    policy_names = {
+        'toxic_chat_claude_1': 'ToxicChat Claude 1',
+        'toxic_simple': 'Toxic Simple'
+    }
     
     # Create table rows with nested structure
-    rows = [
-        {
-            'Policy': 'ToxicChat Claude 1',
+    rows = []
+    for policy_key, (base_df, safeguard_df) in policy_results.items():
+        # Calculate metrics for each model
+        base_metrics = calculate_metrics_with_ci(base_df, n_bootstrap=n_bootstrap)
+        safeguard_metrics = calculate_metrics_with_ci(safeguard_df, n_bootstrap=n_bootstrap)
+        
+        row = {
+            'Policy': policy_names.get(policy_key, policy_key),
             'GPT-OSS-20B': {
                 'Base': {
                     'F1': format_metric_with_ci(*base_metrics['f1']),
@@ -153,13 +204,13 @@ def generate_comparison_table(sample_size: int = 1000, use_cache: bool = True, n
                 }
             }
         }
-    ]
+        rows.append(row)
     
     # Generate LaTeX table
     latex_table = generate_latex_table(
         rows=rows,
         full_width=False,
-        caption_content="Comparison of toxicity detection metrics across base and safeguarded models. Values show mean $\\pm$ 95\\% CI from bootstrap resampling (n=1000). Parse rate shows percentage of prompts successfully parsed.",
+        caption_content="",
         label="tab:policy_comparison",
         caption_at_top=False,
         resize_to_fit=False
@@ -170,7 +221,7 @@ def generate_comparison_table(sample_size: int = 1000, use_cache: bool = True, n
 
 def main():
     rows, latex_table = generate_comparison_table(
-        sample_size=1000, 
+        sample_size=2000, 
         use_cache=True, 
         n_bootstrap=1000
     )
