@@ -1,7 +1,7 @@
 import pytest
-from .classify import classify, _default_parse, ClassificationResult
-from .model_predict import ModelResponse, Model
-from .policies import spam
+from workspace.classify import classify, _default_parse, ClassificationResult
+from workspace.model_predict import ModelResponse, Model
+from workspace.policies import spam
 
 
 def test_default_parse_invalid():

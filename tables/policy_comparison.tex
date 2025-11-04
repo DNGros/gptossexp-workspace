@@ -1,0 +1,19 @@
+% Generated on 2025-11-03 22:27:23 from git commit 4a28f86 (dirty)
+
+\begin{table}[htbp]
+% Note: Add \usepackage{booktabs}, \usepackage{amssymb}, \usepackage{multirow}, and \usepackage{makecell} to document preamble
+\centering
+\begin{tabular}{c c c c c c c c c}
+\toprule
+ & \multicolumn{8}{c}{GPT-OSS-20B} \\
+ & \multicolumn{4}{c}{Base} & \multicolumn{4}{c}{Safeguard} \\
+\cmidrule(lr){2-5}
+\cmidrule(lr){6-9}
+Policy & F1 & Precision & Recall & Parse Rate & F1 & Precision & Recall & Parse Rate \\
+\midrule
+ToxicChat Claude 1 & 0.456 $\pm$ 0.185 & 0.522 $\pm$ 0.222 & 0.413 $\pm$ 0.194 & 94.0 $\pm$ 2.7 & 0.502 $\pm$ 0.206 & 0.786 $\pm$ 0.241 & 0.376 $\pm$ 0.176 & 100.0 $\pm$ 0.0 \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of toxicity detection metrics across base and safeguarded models. Values show mean $\pm$ 95\% CI from bootstrap resampling (n=1000). Parse rate shows percentage of prompts successfully parsed.}
+\label{tab:policy_comparison}
+\end{table}

@@ -62,6 +62,22 @@ def get_policy_module(policy_name: str):
             raise typer.BadParameter(f"Policy '{policy_name}' not found. Available: spam, toxic_chat_claude_1") from e
 
 
+def get_cache_file_path(
+    version: str,
+    model: str,
+    policy: str,
+    split: str,
+    sample_size: int,
+    workspace_dir: Optional[Path] = None
+) -> Path:
+    """Generate the expected cache file path for a given configuration."""
+    if workspace_dir is None:
+        workspace_dir = Path(__file__).parent
+    results_dir = workspace_dir / "results" / version / model
+    base_filename = f"toxic_chat_{policy}_{split}_n{sample_size}.parquet"
+    return results_dir / base_filename
+
+
 def print_summary_stats(results_df: pd.DataFrame):
     """Print summary statistics and confusion matrix."""
     print("\n" + "="*60)
@@ -117,16 +133,28 @@ def print_summary_stats(results_df: pd.DataFrame):
         print(f"  F1 Score: {f1:.4f}")
 
 
-@app.command()
 def run_toxic_chat_evaluation(
-    sample_size: int = typer.Option(20, help='Number of examples to process'),
-    version: Literal['toxicchat0124', 'toxicchat1123'] = typer.Option('toxicchat0124', help='Dataset version to use'),
-    split: Literal['train', 'test'] = typer.Option('test', help='Dataset split to use'),
-    policy: str = typer.Option('toxic_chat_claude_1', help='Policy name (e.g., toxic_chat_claude_1, spam)'),
-    model: Literal['GPT_OSS_20B', 'GPT_OSS_safeguarded_20B'] = typer.Option('GPT_OSS_20B', help='Model to use'),
-    output: Optional[Path] = typer.Option(None, help='Output parquet file path (default: auto-generated in results/)')
+    sample_size: int = 20,
+    version: Literal['toxicchat0124', 'toxicchat1123'] = 'toxicchat0124',
+    split: Literal['train', 'test'] = 'test',
+    policy: str = 'toxic_chat_claude_1',
+    model: Literal['GPT_OSS_20B', 'GPT_OSS_safeguarded_20B'] = 'GPT_OSS_20B',
+    output: Optional[Path] = None,
+    use_cache: bool = True
 ):
     """Run toxicity classification on ToxicChat dataset."""
+    # Check cache first if use_cache is True and output is not explicitly provided
+    if use_cache and output is None:
+        workspace_dir = Path(__file__).parent
+        cache_file = get_cache_file_path(version, model, policy, split, sample_size, workspace_dir)
+        if cache_file.exists():
+            print(f"Loading from cache: {cache_file}")
+            results_df = pd.read_parquet(cache_file)
+            print_summary_stats(results_df)
+            print(f"\nResults DataFrame shape: {results_df.shape}")
+            print(f"Columns: {list(results_df.columns)}")
+            return results_df
+    
     # Load policy module
     policy_module = get_policy_module(policy)
     
@@ -188,19 +216,9 @@ def run_toxic_chat_evaluation(
     # Generate output filename
     if output is None:
         workspace_dir = Path(__file__).parent
-        results_dir = workspace_dir / "results" / version / model
+        output = get_cache_file_path(version, model, policy, split, sample_size, workspace_dir)
+        results_dir = output.parent
         results_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Create base filename: toxic_chat_{policy}_{split}_n{sample_size}.parquet
-        base_filename = f"toxic_chat_{policy}_{split}_n{sample_size}.parquet"
-        output = results_dir / base_filename
-        
-        # If file exists, append incrementing number suffix
-        counter = 1
-        while output.exists():
-            filename = f"toxic_chat_{policy}_{split}_n{sample_size}_{counter}.parquet"
-            output = results_dir / filename
-            counter += 1
     
     print(f"\nSaving results to: {output}")
     results_df.to_parquet(output, index=False)
@@ -208,6 +226,29 @@ def run_toxic_chat_evaluation(
     
     print(f"\nResults DataFrame shape: {results_df.shape}")
     print(f"Columns: {list(results_df.columns)}")
+    return results_df
+
+
+@app.command(name="run-toxic-chat-evaluation")
+def run_toxic_chat_evaluation_cli(
+    sample_size: int = typer.Option(20, help='Number of examples to process'),
+    version: Literal['toxicchat0124', 'toxicchat1123'] = typer.Option('toxicchat0124', help='Dataset version to use'),
+    split: Literal['train', 'test'] = typer.Option('test', help='Dataset split to use'),
+    policy: str = typer.Option('toxic_chat_claude_1', help='Policy name (e.g., toxic_chat_claude_1, spam)'),
+    model: Literal['GPT_OSS_20B', 'GPT_OSS_safeguarded_20B'] = typer.Option('GPT_OSS_20B', help='Model to use'),
+    output: Optional[Path] = typer.Option(None, help='Output parquet file path (default: auto-generated in results/)'),
+    use_cache: bool = typer.Option(True, help='Load from cache if file exists')
+):
+    """CLI wrapper for run_toxic_chat_evaluation."""
+    return run_toxic_chat_evaluation(
+        sample_size=sample_size,
+        version=version,
+        split=split,
+        policy=policy,
+        model=model,
+        output=output,
+        use_cache=use_cache
+    )
 
 
 if __name__ == "__main__":
