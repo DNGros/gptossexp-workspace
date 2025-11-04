@@ -171,7 +171,10 @@ def generate_comparison_table(sample_size: int = 1000, use_cache: bool = True, n
     policy_results = run_policy_evaluations(
         sample_size=sample_size,
         use_cache=use_cache,
-        policies=['toxic_chat_claude_1', 'toxic_simple']
+        policies=[
+            'toxic_chat_claude_1', 
+            #'toxic_simple'
+        ]
     )
     
     # Policy display names
