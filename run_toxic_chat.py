@@ -38,6 +38,8 @@ from pathlib import Path
 from typing import Literal, Optional
 import typer
 import importlib
+import numpy as np
+from enum import Enum
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 from tqdm import tqdm
 
@@ -45,6 +47,142 @@ from .classify import classify
 from .model_predict import Model
 
 app = typer.Typer()
+
+
+class SamplingStrategy(str, Enum):
+    """Strategy for sampling from imbalanced dataset."""
+    NATURAL = "natural"      # Sample proportional to true distribution
+    BALANCED = "balanced"    # 50/50 split between positive and negative
+    NEYMAN = "neyman"        # Sample proportional to sqrt(class_proportion)
+
+
+def calculate_target_counts(
+    total_available_pos: int,
+    total_available_neg: int,
+    sample_size: int,
+    strategy: SamplingStrategy,
+    true_pos_rate: float
+) -> tuple[int, int]:
+    """
+    Calculate how many positive and negative examples to sample.
+    
+    Args:
+        total_available_pos: Total positive examples available in dataset
+        total_available_neg: Total negative examples available in dataset
+        sample_size: Desired total sample size
+        strategy: Sampling strategy to use
+        true_pos_rate: True positive rate in the population
+        
+    Returns:
+        tuple: (n_pos_to_sample, n_neg_to_sample)
+        
+    Note: Honors sample_size by filling with other class if insufficient samples.
+    """
+    if strategy == SamplingStrategy.NATURAL:
+        target_pos = int(sample_size * true_pos_rate)
+        target_neg = sample_size - target_pos
+        
+    elif strategy == SamplingStrategy.BALANCED:
+        target_pos = sample_size // 2
+        target_neg = sample_size - target_pos
+        
+    elif strategy == SamplingStrategy.NEYMAN:
+        # Neyman allocation: sample proportional to sqrt(class_proportion)
+        sqrt_pos = np.sqrt(true_pos_rate)
+        sqrt_neg = np.sqrt(1 - true_pos_rate)
+        ratio_pos = sqrt_pos / (sqrt_pos + sqrt_neg)
+        target_pos = int(sample_size * ratio_pos)
+        target_neg = sample_size - target_pos
+    else:
+        raise ValueError(f"Unknown sampling strategy: {strategy}")
+    
+    # Handle insufficient samples
+    actual_pos = min(target_pos, total_available_pos)
+    actual_neg = min(target_neg, total_available_neg)
+    
+    # If we couldn't get enough of one class, try to fill with the other
+    if actual_pos < target_pos:
+        # Not enough positives, take more negatives
+        actual_neg = min(sample_size - actual_pos, total_available_neg)
+    elif actual_neg < target_neg:
+        # Not enough negatives (unlikely!), take more positives
+        actual_pos = min(sample_size - actual_neg, total_available_pos)
+    
+    return actual_pos, actual_neg
+
+
+def stratified_sample(
+    df: pd.DataFrame,
+    label_column: str,
+    n_positive: int,
+    n_negative: int,
+    random_state: int = 42
+) -> pd.DataFrame:
+    """
+    Sample stratified by label with specified counts for each class.
+    
+    Args:
+        df: DataFrame to sample from
+        label_column: Name of the binary label column
+        n_positive: Number of positive examples to sample
+        n_negative: Number of negative examples to sample
+        random_state: Random seed for reproducibility
+        
+    Returns:
+        DataFrame with sampled examples
+    """
+    df_pos = df[df[label_column] == 1]
+    df_neg = df[df[label_column] == 0]
+    
+    # Sample from each class
+    sampled_pos = df_pos.sample(n=min(n_positive, len(df_pos)), random_state=random_state)
+    sampled_neg = df_neg.sample(n=min(n_negative, len(df_neg)), random_state=random_state)
+    
+    # Combine and shuffle
+    sampled_df = pd.concat([sampled_pos, sampled_neg], ignore_index=True)
+    sampled_df = sampled_df.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+    
+    return sampled_df
+
+
+def calculate_sample_weights(
+    labels: np.ndarray,
+    true_pos_rate: float,
+    strategy: SamplingStrategy
+) -> np.ndarray:
+    """
+    Calculate sample weights for reweighting to population distribution.
+    
+    Args:
+        labels: Binary labels (0 or 1)
+        true_pos_rate: True positive rate in the population
+        strategy: Sampling strategy used
+        
+    Returns:
+        Array of sample weights
+        
+    Note: For natural sampling, all weights are 1.0 (no reweighting needed).
+    """
+    if strategy == SamplingStrategy.NATURAL:
+        # No reweighting needed for natural sampling
+        return np.ones(len(labels))
+    
+    # Calculate actual sampling proportions
+    n_pos = np.sum(labels == 1)
+    n_neg = np.sum(labels == 0)
+    total = len(labels)
+    
+    actual_pos_rate = n_pos / total
+    actual_neg_rate = n_neg / total
+    
+    # Weight = true_proportion / sample_proportion
+    pos_weight = true_pos_rate / actual_pos_rate if actual_pos_rate > 0 else 1.0
+    neg_weight = (1 - true_pos_rate) / actual_neg_rate if actual_neg_rate > 0 else 1.0
+    
+    # Assign weights based on labels
+    weights = np.where(labels == 1, pos_weight, neg_weight)
+    
+    return weights
 
 
 def get_policy_module(policy_name: str):
@@ -68,13 +206,18 @@ def get_cache_file_path(
     policy: str,
     split: str,
     sample_size: int,
-    workspace_dir: Optional[Path] = None
+    workspace_dir: Optional[Path] = None,
+    sampling_strategy: SamplingStrategy = SamplingStrategy.NATURAL
 ) -> Path:
     """Generate the expected cache file path for a given configuration."""
     if workspace_dir is None:
         workspace_dir = Path(__file__).parent
     results_dir = workspace_dir / "results" / version / model
-    base_filename = f"toxic_chat_{policy}_{split}_n{sample_size}.parquet"
+    
+    # Add sampling strategy suffix for non-natural sampling
+    strategy_suffix = "" if sampling_strategy == SamplingStrategy.NATURAL else f"_{sampling_strategy.value}"
+    base_filename = f"toxic_chat_{policy}_{split}_n{sample_size}{strategy_suffix}.parquet"
+    
     return results_dir / base_filename
 
 
@@ -84,6 +227,15 @@ def print_summary_stats(results_df: pd.DataFrame):
     print("SUMMARY STATISTICS")
     print("="*60)
     print(f"Total examples processed: {len(results_df)}")
+    
+    # Show sampling information if weights are present
+    if 'sample_weight' in results_df.columns and 'sampling_strategy' in results_df.columns:
+        strategy = results_df['sampling_strategy'].iloc[0]
+        if strategy != SamplingStrategy.NATURAL.value:
+            weights = results_df['sample_weight']
+            print(f"\nSampling Strategy: {strategy}")
+            print(f"  Weight range: [{weights.min():.3f}, {weights.max():.3f}]")
+            print(f"  Unique weights: {weights.nunique()}")
     
     if 'parsed_successfully' in results_df.columns:
         successful_parses = results_df['parsed_successfully'].sum()
@@ -140,13 +292,29 @@ def run_toxic_chat_evaluation(
     policy: str = 'toxic_chat_claude_1',
     model: Literal['GPT_OSS_20B', 'GPT_OSS_safeguarded_20B'] = 'GPT_OSS_20B',
     output: Optional[Path] = None,
-    use_cache: bool = True
+    use_cache: bool = True,
+    sampling_strategy: SamplingStrategy = SamplingStrategy.NATURAL
 ):
-    """Run toxicity classification on ToxicChat dataset."""
+    """
+    Run toxicity classification on ToxicChat dataset.
+    
+    Args:
+        sample_size: Number of examples to sample
+        version: Dataset version
+        split: Dataset split (train/test)
+        policy: Policy name to use
+        model: Model to use
+        output: Optional output path (auto-generated if None)
+        use_cache: Whether to load from cache if available
+        sampling_strategy: Strategy for sampling (natural/balanced/neyman)
+        
+    Note: The true positive rate is automatically inferred from the full dataset
+          before sampling, ensuring accurate weight calculation.
+    """
     # Check cache first if use_cache is True and output is not explicitly provided
     if use_cache and output is None:
         workspace_dir = Path(__file__).parent
-        cache_file = get_cache_file_path(version, model, policy, split, sample_size, workspace_dir)
+        cache_file = get_cache_file_path(version, model, policy, split, sample_size, workspace_dir, sampling_strategy)
         if cache_file.exists():
             print(f"Loading from cache: {cache_file}")
             results_df = pd.read_parquet(cache_file)
@@ -163,18 +331,51 @@ def run_toxic_chat_evaluation(
     
     print(f"Using policy: {policy}")
     print(f"Using model: {model} ({model_enum})")
+    print(f"Using sampling strategy: {sampling_strategy.value}")
     
     dataset = load_dataset("lmsys/toxic-chat", version, split=split)
     
     print(f"Dataset loaded: {len(dataset)} examples")
-    print(f"Sampling {sample_size} examples...")
     
     df = dataset.to_pandas()
-    if len(df) > sample_size:
-        # Use stable sampling: shuffle once, then take first n items
-        # This ensures that increasing sample_size preserves previous samples
-        df_shuffled = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
-        df = df_shuffled.head(sample_size).reset_index(drop=True)
+    
+    # Infer true positive rate from full dataset
+    true_positive_rate = (df['toxicity'] == 1).sum() / len(df)
+    print(f"True positive rate in dataset: {true_positive_rate:.4f} ({(df['toxicity'] == 1).sum()}/{len(df)})")
+    
+    # Apply sampling strategy
+    if sampling_strategy == SamplingStrategy.NATURAL:
+        # Natural sampling: random sample from full dataset
+        print(f"Sampling {sample_size} examples (natural sampling)...")
+        if len(df) > sample_size:
+            df_shuffled = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
+            df = df_shuffled.head(sample_size).reset_index(drop=True)
+    else:
+        # Stratified sampling: sample by class
+        total_pos = (df['toxicity'] == 1).sum()
+        total_neg = (df['toxicity'] == 0).sum()
+        
+        n_pos, n_neg = calculate_target_counts(
+            total_available_pos=total_pos,
+            total_available_neg=total_neg,
+            sample_size=sample_size,
+            strategy=sampling_strategy,
+            true_pos_rate=true_positive_rate
+        )
+        
+        print(f"Sampling {sample_size} examples ({sampling_strategy.value} sampling)...")
+        print(f"  Target: {n_pos} positive, {n_neg} negative")
+        print(f"  Available: {total_pos} positive, {total_neg} negative")
+        
+        df = stratified_sample(
+            df=df,
+            label_column='toxicity',
+            n_positive=n_pos,
+            n_negative=n_neg,
+            random_state=42
+        )
+        
+        print(f"  Sampled: {(df['toxicity'] == 1).sum()} positive, {(df['toxicity'] == 0).sum()} negative")
     
     print(f"Processing {len(df)} examples...")
     
@@ -211,12 +412,19 @@ def run_toxic_chat_evaluation(
     
     results_df = pd.DataFrame(results)
     
+    # Calculate and add sample weights
+    labels = results_df['toxicity'].values
+    weights = calculate_sample_weights(labels, true_positive_rate, sampling_strategy)
+    results_df['sample_weight'] = weights
+    results_df['sampling_strategy'] = sampling_strategy.value
+    results_df['true_positive_rate'] = true_positive_rate
+    
     print_summary_stats(results_df)
     
     # Generate output filename
     if output is None:
         workspace_dir = Path(__file__).parent
-        output = get_cache_file_path(version, model, policy, split, sample_size, workspace_dir)
+        output = get_cache_file_path(version, model, policy, split, sample_size, workspace_dir, sampling_strategy)
         results_dir = output.parent
         results_dir.mkdir(parents=True, exist_ok=True)
     
@@ -237,7 +445,8 @@ def run_toxic_chat_evaluation_cli(
     policy: str = typer.Option('toxic_chat_claude_1', help='Policy name (e.g., toxic_chat_claude_1, spam)'),
     model: Literal['GPT_OSS_20B', 'GPT_OSS_safeguarded_20B'] = typer.Option('GPT_OSS_20B', help='Model to use'),
     output: Optional[Path] = typer.Option(None, help='Output parquet file path (default: auto-generated in results/)'),
-    use_cache: bool = typer.Option(True, help='Load from cache if file exists')
+    use_cache: bool = typer.Option(True, help='Load from cache if file exists'),
+    sampling_strategy: SamplingStrategy = typer.Option(SamplingStrategy.NATURAL, help='Sampling strategy (natural/balanced/neyman)')
 ):
     """CLI wrapper for run_toxic_chat_evaluation."""
     return run_toxic_chat_evaluation(
@@ -247,7 +456,8 @@ def run_toxic_chat_evaluation_cli(
         policy=policy,
         model=model,
         output=output,
-        use_cache=use_cache
+        use_cache=use_cache,
+        sampling_strategy=sampling_strategy
     )
 
 
