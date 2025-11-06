@@ -1,114 +1,47 @@
 """
-Minimal reproducible example showing temperature=0 outputs differ between
-Hugging Face Inference API and local transformers pipeline.
-
-Both methods should produce identical outputs at temperature=0, but they don't.
-This demonstrates a potential issue with how the pipeline applies chat templates
-or generates responses.
+Minimal reproducible example comparing InferenceClient vs transformers pipeline.
 """
 
 from huggingface_hub import InferenceClient
 from transformers import pipeline
-import json
 
+# Simple prompt
+messages = [{"role": "user", "content": "Give advice on planning a trip to Paris."}]
 
-def test_api(messages, max_tokens=200):
-    """Test using Hugging Face Inference API."""
-    print("="*70)
-    print("API (InferenceClient)")
-    print("="*70)
-    
-    client = InferenceClient()
-    completion = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=messages,
-        temperature=0.0,
-        max_tokens=max_tokens,
-    )
-    
-    response = completion.choices[0].message.content
-    print(f"Response ({len(response)} chars):")
-    print(response)
-    print()
-    return response
+print("API (InferenceClient)")
+print("="*70)
 
+# Call API
+client = InferenceClient()
+completion = client.chat.completions.create(
+    model="openai/gpt-oss-20b",
+    messages=messages,
+    temperature=0.0,
+    max_tokens=200,
+    #extra_body={"reasoning_effort": "medium"}
+)
 
-def test_pipeline(messages, max_tokens=200):
-    """Test using local transformers pipeline."""
-    print("="*70)
-    print("LOCAL (transformers pipeline)")
-    print("="*70)
-    
-    generator = pipeline(
-        "text-generation",
-        model="openai/gpt-oss-20b",
-        torch_dtype="auto",
-        device_map="auto",
-    )
-    
-    result = generator(
-        messages,
-        max_new_tokens=max_tokens,
-        temperature=1.0,  # pipeline requires temp > 0
-        do_sample=False,  # but do_sample=False makes it deterministic
-    )
-    
-    # Extract assistant's response
-    generated = result[0]["generated_text"]
-    if isinstance(generated, list) and len(generated) > len(messages):
-        response = generated[-1].get("content", "")
-    else:
-        response = str(generated)
-    
-    print(f"Response ({len(response)} chars):")
-    print(response)
-    print()
-    return response
+# Print reasoning and output
+message = completion.choices[0].message
+print("REASONING:")
+print(message.reasoning)
+print("\nOUTPUT:")
+print(message.content)
 
+print("\n" + "="*70)
+print("LOCAL (transformers pipeline)")
+print("="*70)
 
-def main():
-    """Run the comparison test."""
-    print("#"*70)
-    print("TEMPERATURE=0 OUTPUTS DIFFER: API vs Pipeline")
-    print("#"*70)
-    print()
-    
-    # Simple deterministic prompt
-    messages = [
-        {
-            "role": "user",
-            "content": "Give some advice on planning a trip to Paris."
-        }
-    ]
-    
-    print("Messages:")
-    print(json.dumps(messages, indent=2))
-    print()
-    
-    # Test both methods
-    api_response = test_api(messages, max_tokens=200)
-    pipeline_response = test_pipeline(messages, max_tokens=200)
-    
-    # Compare
-    print("="*70)
-    print("COMPARISON")
-    print("="*70)
-    
-    if api_response == pipeline_response:
-        print("✓ Outputs are IDENTICAL")
-    else:
-        print("✗ Outputs DIFFER")
-        print(f"\nAPI length: {len(api_response)} chars")
-        print(f"Pipeline length: {len(pipeline_response)} chars")
-        
-        # Show first difference
-        for i, (c1, c2) in enumerate(zip(api_response, pipeline_response)):
-            if c1 != c2:
-                print(f"\nFirst difference at position {i}:")
-                print(f"  API: ...{api_response[max(0,i-20):i+20]}...")
-                print(f"  Pipeline: ...{pipeline_response[max(0,i-20):i+20]}...")
-                break
+# Call pipeline
+generator = pipeline("text-generation", model="openai/gpt-oss-20b", torch_dtype="auto", device_map="auto")
+result = generator(
+    messages,
+    max_new_tokens=200,
+    temperature=0.0,
+    do_sample=False,
+)
 
-
-if __name__ == "__main__":
-    main()
+# Print output
+response = result[0]["generated_text"][-1]["content"]
+print("OUTPUT:")
+print(response)
