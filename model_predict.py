@@ -24,38 +24,36 @@ cache = diskcache.Cache(str(CACHE_DIR))
 
 
 class LocalModelCache:
-    """Singleton cache for local models and tokenizers to avoid reloading."""
+    """Singleton cache for local pipeline generators to avoid reloading."""
     _instance = None
-    _models = {}
-    _tokenizers = {}
+    _pipelines = {}
     
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
     
-    def get_model_and_tokenizer(self, model_id: str):
-        """Get or load model and tokenizer."""
-        if model_id not in self._models:
-            print(f"Loading model: {model_id} (this may take a while...)")
+    def get_pipeline(self, model_id: str):
+        """Get or load text-generation pipeline."""
+        if model_id not in self._pipelines:
+            print(f"Loading model pipeline: {model_id} (this may take a while...)")
             
-            # Lazy import to avoid loading transformers/torch unless needed
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            # Lazy import to avoid loading transformers unless needed
+            from transformers import pipeline
             
-            self._tokenizers[model_id] = AutoTokenizer.from_pretrained(model_id)
-            self._models[model_id] = AutoModelForCausalLM.from_pretrained(
-                model_id,
+            self._pipelines[model_id] = pipeline(
+                "text-generation",
+                model=model_id,
                 torch_dtype="auto",
-                device_map="auto",
+                device_map="auto",  # Automatically place on available GPUs
             )
-            print(f"Model loaded on device: {next(self._models[model_id].parameters()).device}")
+            print(f"Pipeline loaded successfully")
         
-        return self._models[model_id], self._tokenizers[model_id]
+        return self._pipelines[model_id]
     
     def clear(self):
-        """Clear cached models to free memory."""
-        self._models.clear()
-        self._tokenizers.clear()
+        """Clear cached pipelines to free memory."""
+        self._pipelines.clear()
 
 
 @dataclass
@@ -108,41 +106,6 @@ def _build_messages(prompt: str, system_prompt: Optional[str] = None) -> list[di
     return messages
 
 
-def _parse_harmony_channels(raw_output: str) -> tuple[Optional[str], Optional[str]]:
-    """
-    Parse Harmony format channels from model output.
-    
-    Returns:
-        tuple: (reasoning, content) where reasoning is from analysis channel
-               and content is from final channel
-    """
-    reasoning = None
-    content = None
-    
-    # Look for analysis channel
-    if '<|channel|>analysis' in raw_output:
-        parts = raw_output.split('<|channel|>')
-        for part in parts:
-            if part.startswith('analysis'):
-                if '<|message|>' in part:
-                    analysis_content = part.split('<|message|>', 1)[1]
-                    # Stop at next special token
-                    analysis_content = analysis_content.split('<|')[0]
-                    reasoning = analysis_content.strip()
-    
-    # Look for final channel
-    if '<|channel|>final' in raw_output:
-        parts = raw_output.split('<|channel|>')
-        for part in parts:
-            if part.startswith('final'):
-                if '<|message|>' in part:
-                    final_content = part.split('<|message|>', 1)[1]
-                    final_content = final_content.split('<|')[0]
-                    content = final_content.strip()
-    
-    return reasoning, content
-
-
 def _get_local_model_response(
     model: Model,
     prompt: str,
@@ -151,53 +114,41 @@ def _get_local_model_response(
     max_tokens: int = 8192,
 ) -> ModelResponse:
     """
-    Get model response using local transformers with apply_chat_template.
+    Get model response using local transformers pipeline.
     
-    This applies the Harmony format via the model's chat template.
+    Uses the high-level pipeline API which handles chat templates automatically.
     """
-    # Lazy import to avoid loading unless needed
-    import torch
-    
-    # Get cached model and tokenizer
+    # Get cached pipeline
     model_cache = LocalModelCache()
-    local_model, tokenizer = model_cache.get_model_and_tokenizer(str(model))
+    generator = model_cache.get_pipeline(str(model))
     
     # Build messages
     messages = _build_messages(prompt, system_prompt)
     
-    # Apply chat template (this should apply Harmony format)
-    inputs = tokenizer.apply_chat_template(
+    # Generate response using pipeline
+    result = generator(
         messages,
-        add_generation_prompt=True,
-        return_tensors="pt",
-        return_dict=True,
-    ).to(local_model.device)
+        max_new_tokens=max_tokens,
+        temperature=temperature if temperature > 0 else 1.0,  # pipeline requires temp > 0
+        do_sample=(temperature > 0),
+    )
     
-    # Generate response
-    with torch.no_grad():
-        outputs = local_model.generate(
-            **inputs,
-            max_new_tokens=max_tokens,
-            do_sample=(temperature > 0),
-            temperature=temperature if temperature > 0 else None,
-            pad_token_id=tokenizer.eos_token_id,
-        )
+    # Extract the generated text
+    # The pipeline returns the full conversation including the prompt,
+    # so we need to get just the assistant's response
+    generated_text = result[0]["generated_text"]
     
-    # Extract just the new tokens (the response)
-    response_tokens = outputs[0][inputs['input_ids'].shape[1]:]
-    raw_output = tokenizer.decode(response_tokens, skip_special_tokens=False)
-    
-    # Try to parse Harmony format channels
-    reasoning, content = _parse_harmony_channels(raw_output)
-    
-    # Fallback: if we can't parse channels, use the whole response with special tokens removed
-    if content is None:
-        content = tokenizer.decode(response_tokens, skip_special_tokens=True)
-        print("Warning: Could not parse Harmony channels, using full decoded response")
+    # The last message in generated_text should be the assistant's response
+    if isinstance(generated_text, list) and len(generated_text) > len(messages):
+        assistant_message = generated_text[-1]
+        content = assistant_message.get("content", "")
+    else:
+        # Fallback: use the whole generated text
+        content = str(generated_text)
     
     return ModelResponse(
         response=content,
-        reasoning=reasoning or "",
+        reasoning="",  # Pipeline doesn't expose reasoning separately
         model=model,
         prompt=prompt,
         system_prompt=system_prompt,
