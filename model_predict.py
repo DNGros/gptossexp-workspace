@@ -82,9 +82,27 @@ def get_model_response(
         messages=msgs,
         **params,
     )
+
+    # Debug: Check what attributes are available
+    message = completion.choices[0].message
+
+    # Try multiple possible attribute names for reasoning
+    reasoning = None
+    for attr_name in ['reasoning', 'reasoning_content', 'thought', 'chain_of_thought']:
+        if hasattr(message, attr_name):
+            reasoning = getattr(message, attr_name)
+            if reasoning:  # If we found a non-empty reasoning
+                print(f"DEBUG: Found reasoning in attribute '{attr_name}'")
+                break
+
+    if reasoning is None:
+        # Debug: Print all available attributes to help diagnose
+        print(f"DEBUG: No reasoning found. Available message attributes: {[a for a in dir(message) if not a.startswith('_')]}")
+        reasoning = ""
+
     response = ModelResponse(
         response=completion.choices[0].message.content,
-        reasoning=getattr(completion.choices[0].message, 'reasoning', None) or "",
+        reasoning=reasoning or "",
         model=model,
         prompt=prompt,
         system_prompt=system_prompt,
