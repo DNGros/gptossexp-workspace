@@ -50,11 +50,12 @@ def get_model_response(
     system_prompt: str = None,
     temperature: float = 0.0,
     max_tokens: int = 8192,
+    use_cache: bool = True,
 ):
     # Check cache first
     cache_key = _get_cache_key(model, prompt, system_prompt, temperature, max_tokens)
     cached_response = cache.get(cache_key)
-    if cached_response is not None:
+    if cached_response is not None and use_cache:
         return cached_response
     
     # If not cached, make API call
@@ -99,5 +100,6 @@ if __name__ == "__main__":
     response = get_model_response(
         model=Model.GPT_OSS_20B,
         prompt="How many 'G's in 'huggingface'?",
+        use_cache=False,
     )
     print(response)
