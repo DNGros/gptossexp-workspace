@@ -19,6 +19,7 @@ completion = client.chat.completions.create(
     temperature=0.0,
     max_tokens=200,
     #extra_body={"reasoning_effort": "medium"}
+    # ??? unclear what default is or how to match in pipeline
 )
 
 # Print reasoning and output
