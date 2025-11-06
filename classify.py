@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import re
 from pathlib import Path
-from .model_predict import ModelResponse, get_model_response, Model
+from .model_predict import ModelResponse, get_model_response, Model, InferenceBackend
 
 
 @dataclass
@@ -54,7 +54,8 @@ def _default_parse(response: ModelResponse) -> ClassificationResult:
 def classify(
     text: str,
     policy_module,
-    model: Model = Model.GPT_OSS_20B
+    model: Model = Model.GPT_OSS_20B,
+    backend: InferenceBackend = InferenceBackend.API,
 ) -> ClassificationResult:
     """
     Classify text using a policy module.
@@ -63,6 +64,7 @@ def classify(
         text: Text to classify
         policy_module: Python module from policies/ (e.g., policies.spam)
         model: Model to use for classification
+        backend: Inference backend (API or LOCAL)
     
     Returns:
         ClassificationResult with binary label, fine-grain label, and metadata
@@ -81,7 +83,8 @@ def classify(
     response = get_model_response(
         model=model,
         prompt=text,
-        system_prompt=system_prompt
+        system_prompt=system_prompt,
+        backend=backend,
     )
     
     # Use custom parser if available, otherwise default
