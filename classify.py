@@ -56,6 +56,7 @@ def classify(
     policy_module,
     model: Model = Model.GPT_OSS_20B,
     backend: InferenceBackend = InferenceBackend.API,
+    use_cache: bool = True,
 ) -> ClassificationResult:
     """
     Classify text using a policy module.
@@ -85,6 +86,7 @@ def classify(
         prompt=text,
         system_prompt=system_prompt,
         backend=backend,
+        use_cache=use_cache,
     )
     
     # Use custom parser if available, otherwise default

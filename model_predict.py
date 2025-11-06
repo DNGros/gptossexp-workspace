@@ -145,10 +145,15 @@ def _get_local_model_response(
     else:
         # Fallback: use the whole generated text
         content = str(generated_text)
+
+    # Hacky parse the response.
+    reasoning, content = content.rsplit("final", 1)
+    if reasoning.startswith("analysis"):
+        reasoning = reasoning[len("analysis"):]
     
     return ModelResponse(
         response=content,
-        reasoning="",  # Pipeline doesn't expose reasoning separately
+        reasoning=reasoning,
         model=model,
         prompt=prompt,
         system_prompt=system_prompt,

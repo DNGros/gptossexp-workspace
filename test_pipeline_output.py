@@ -9,6 +9,7 @@ This will help us understand:
 
 from transformers import pipeline
 import json
+from .model_predict import get_model_response, InferenceBackend
 
 
 def test_pipeline_output():
@@ -16,6 +17,28 @@ def test_pipeline_output():
     print("="*70)
     print("TESTING TRANSFORMERS PIPELINE OUTPUT")
     print("="*70)
+    
+    # Test with a simple prompt that should produce reasoning
+    messages = [
+        {"role": "system", "content": "You are a helpful math tutor. Show your work."},
+        {"role": "user", "content": "What is 17 * 23? Show your reasoning step by step."},
+    ]
+    
+    print("Input messages:")
+    print(json.dumps(messages, indent=2))
+
+    print(get_model_response(
+        model="openai/gpt-oss-20b",
+        prompt="What is 17 * 23? Show your reasoning step by step.",
+        system_prompt="You are a helpful math tutor. Show your work.",
+        max_tokens=5000,
+        temperature=0,
+        use_cache=False,
+        backend=InferenceBackend.LOCAL,
+    ))
+    exit()
+
+
     print("\nLoading pipeline (this may take a while)...")
     
     # Create pipeline
@@ -27,21 +50,13 @@ def test_pipeline_output():
     )
     
     print("✓ Pipeline loaded\n")
-    
-    # Test with a simple prompt that should produce reasoning
-    messages = [
-        {"role": "system", "content": "You are a helpful math tutor. Show your work."},
-        {"role": "user", "content": "What is 17 * 23? Show your reasoning step by step."},
-    ]
-    
-    print("Input messages:")
-    print(json.dumps(messages, indent=2))
+
     print("\nGenerating response...")
     
     # Generate
     result = generator(
         messages,
-        max_new_tokens=200,
+        max_new_tokens=5000,
         temperature=0.7,
     )
     
@@ -71,8 +86,8 @@ def test_pipeline_output():
             print(f"\nMessage {i}:")
             print(f"  Role: {msg.get('role', 'N/A')}")
             content = msg.get('content', '')
-            if len(content) > 200:
-                print(f"  Content: {content[:200]}...")
+            if len(content) > 1000:
+                print(f"  Content: {content[:1000]}...")
                 print(f"  (truncated, full length: {len(content)} chars)")
             else:
                 print(f"  Content: {content}")

@@ -56,6 +56,7 @@ def compare_single_example(
         policy_module=policy_module,
         model=model,
         backend=InferenceBackend.LOCAL,
+        use_cache=False,
     )
     
     # Compare results
