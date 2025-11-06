@@ -7,3 +7,4 @@ Posting progress on [Dactile.net](Dactile.net).
 - [01: Notes on the paper and my experience getting it running](https://dactile.net/p/dev-notes-01)
 - [02: Initial replication on ToxicChat](https://dactile.net/dev-notes-02)
 - [03: Replication on 3 prompts on ToxicChat](https://dactile.net/dev-notes-03)
+- [04: Finding differing results between HuggingFace Inference and pipeline](https://dactile.net/dev-notes-03)
