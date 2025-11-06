@@ -18,7 +18,7 @@ from model_predict import Model
 from difflib import SequenceMatcher
 
 
-def test_inference_client(messages, max_tokens=500):
+def test_inference_client(messages, max_tokens=800):
     """Test using Hugging Face Inference API (what model_predict.py uses)."""
     print("\n" + "="*70)
     print("METHOD 1: Hugging Face Inference Client (API)")
@@ -67,7 +67,7 @@ def test_inference_client(messages, max_tokens=500):
     return result
 
 
-def test_local_transformers(messages, max_tokens=500):
+def test_local_transformers(messages, max_tokens=800):
     """Test using local Transformers with apply_chat_template (Harmony format)."""
     print("\n" + "="*70)
     print("METHOD 2: Local Transformers with apply_chat_template")
@@ -254,24 +254,26 @@ def main():
     # Create a prompt that:
     # - Has a deterministic answer (math problem)
     # - Requires reasoning
-    # - Asks for creative formatting to make identical output less likely without proper format
+    # - Requires creative output (story) to produce longer, more comparable responses
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful math tutor. Always show your reasoning step-by-step."
+            "content": "You are a helpful assistant who loves math and creative storytelling. Always show your reasoning step-by-step."
         },
         {
             "role": "user",
-            "content": "Calculate 17 * 23, then add 156. Show your work step by step, then give the final answer in the format: 'The answer is: X'"
+            "content": """First, calculate 17 * 23, then add 156. Show your work step by step.
+
+Then, using the final answer as the number of goats, write a short 3-paragraph story about a farmer who discovers exactly that many goats have mysteriously appeared on their farm one morning. Make it whimsical and include the exact number prominently in the story."""
         }
     ]
 
     try:
         # Test method 1: Inference Client
-        result1 = test_inference_client(messages, max_tokens=500)
+        result1 = test_inference_client(messages, max_tokens=800)
 
         # Test method 2: Local Transformers
-        result2 = test_local_transformers(messages, max_tokens=500)
+        result2 = test_local_transformers(messages, max_tokens=800)
 
         # Compare results
         compare_results(result1, result2)
