@@ -1,7 +1,7 @@
 import pandas as pd
 from pathlib import Path
 from workspace.run_toxic_chat import run_toxic_chat_evaluation
-from workspace.model_predict import Model
+from workspace.model_predict import Model, InferenceBackend
 from workspace.common.htmlrendering import generate_html_table
 from workspace.metrics import (
     calculate_classification_metrics_with_ci,
@@ -52,9 +52,11 @@ def run_model_evaluations(
     split: str = 'test',
     policy: str = 'toxic_chat_claude_1',
     sampling_strategy: str = 'natural',
+    backend: InferenceBackend = InferenceBackend.LOCAL,
+    batch_size: int = 8,
 ):
     """Run toxic chat evaluation for both base and safeguarded models.
-    
+
     Args:
         sample_size: Number of examples to sample
         use_cache: Whether to use cached results
@@ -62,15 +64,17 @@ def run_model_evaluations(
         split: Dataset split
         policy: Policy name
         sampling_strategy: Sampling strategy (natural/balanced/neyman)
-    
+        backend: Inference backend (API or LOCAL)
+        batch_size: Batch size for LOCAL backend
+
     Returns:
         tuple: (base_df, safeguard_df) DataFrames with evaluation results
     """
     from workspace.run_toxic_chat import SamplingStrategy
-    
+
     # Convert string to enum
     strategy_enum = SamplingStrategy(sampling_strategy)
-    
+
     base_df = run_toxic_chat_evaluation(
         sample_size=sample_size,
         version=version,
@@ -79,8 +83,10 @@ def run_model_evaluations(
         model=Model.GPT_OSS_20B.name,
         use_cache=use_cache,
         sampling_strategy=strategy_enum,
+        backend=backend,
+        batch_size=batch_size,
     )
-    
+
     safeguard_df = run_toxic_chat_evaluation(
         sample_size=sample_size,
         version=version,
@@ -89,8 +95,10 @@ def run_model_evaluations(
         model=Model.GPT_OSS_safeguarded_20B.name,
         use_cache=use_cache,
         sampling_strategy=strategy_enum,
+        backend=backend,
+        batch_size=batch_size,
     )
-    
+
     return base_df, safeguard_df
 
 
@@ -101,9 +109,11 @@ def run_policy_evaluations(
     split: str = 'test',
     policies: list = None,
     sampling_strategy: str = 'natural',
+    backend: InferenceBackend = InferenceBackend.LOCAL,
+    batch_size: int = 8,
 ):
     """Run toxic chat evaluation for multiple policies on both models.
-    
+
     Args:
         sample_size: Number of examples to sample
         use_cache: Whether to use cached results
@@ -111,13 +121,15 @@ def run_policy_evaluations(
         split: Dataset split
         policies: List of policy names
         sampling_strategy: Sampling strategy (natural/balanced/neyman)
-    
+        backend: Inference backend (API or LOCAL)
+        batch_size: Batch size for LOCAL backend
+
     Returns:
         dict: {policy_name: (base_df, safeguard_df)} for each policy
     """
     if policies is None:
         policies = ['toxic_chat_claude_1', 'toxic_simple']
-    
+
     results = {}
     for policy in policies:
         base_df, safeguard_df = run_model_evaluations(
@@ -127,9 +139,11 @@ def run_policy_evaluations(
             split=split,
             policy=policy,
             sampling_strategy=sampling_strategy,
+            backend=backend,
+            batch_size=batch_size,
         )
         results[policy] = (base_df, safeguard_df)
-    
+
     return results
 
 
@@ -137,30 +151,38 @@ def run_all_policies(
     sample_size: int = 300,
     use_cache: bool = True,
     sampling_strategy: str = 'natural',
+    backend: InferenceBackend = InferenceBackend.LOCAL,
+    batch_size: int = 8,
 ):
     """Run evaluations for both models and concatenate results."""
     base_df, safeguard_df = run_model_evaluations(
         sample_size=sample_size,
         use_cache=use_cache,
         sampling_strategy=sampling_strategy,
+        backend=backend,
+        batch_size=batch_size,
     )
     return pd.concat([base_df, safeguard_df])
 
 
 def generate_comparison_table(
-    sample_size: int = 1000, 
-    use_cache: bool = True, 
+    sample_size: int = 1000,
+    use_cache: bool = True,
     n_bootstrap: int = 1000,
     sampling_strategy: str = 'natural',
+    backend: InferenceBackend = InferenceBackend.LOCAL,
+    batch_size: int = 8,
 ):
     """Generate HTML table comparing policies across models.
-    
+
     Args:
         sample_size: Number of examples to sample
         use_cache: Whether to use cached results
         n_bootstrap: Number of bootstrap iterations
         sampling_strategy: Sampling strategy (natural/balanced/neyman)
-    
+        backend: Inference backend (API or LOCAL)
+        batch_size: Batch size for LOCAL backend
+
     Returns:
         str: HTML table string
     """
@@ -174,6 +196,8 @@ def generate_comparison_table(
             'toxic_known_dataset',
         ],
         sampling_strategy=sampling_strategy,
+        backend=backend,
+        batch_size=batch_size,
     )
     
     # Policy display names
