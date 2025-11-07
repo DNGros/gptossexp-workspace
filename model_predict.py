@@ -52,11 +52,20 @@ class LocalModelCache:
             print(f"Loading model pipeline: {model_id} (this may take a while...)")
 
             # Lazy import to avoid loading transformers unless needed
-            from transformers import pipeline
+            from transformers import pipeline, AutoTokenizer
+
+            # Load tokenizer with left padding for decoder-only models
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            tokenizer.padding_side = 'left'
+            
+            # Ensure pad token is set (required for batched generation)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
 
             self._pipelines[model_id] = pipeline(
                 "text-generation",
                 model=model_id,
+                tokenizer=tokenizer,
                 torch_dtype="auto",
                 device_map="auto",  # Automatically place on available GPUs
             )
@@ -123,6 +132,54 @@ def _get_cache_key(
         cache_data["backend"] = str(backend)
     cache_string = json.dumps(cache_data, sort_keys=True)
     return hashlib.sha256(cache_string.encode()).hexdigest()
+
+
+def clear_cache_by_backend(backend: InferenceBackend = None):
+    """
+    Clear cached responses, optionally filtered by backend.
+    
+    Args:
+        backend: If specified, only clear cache for this backend.
+                 If None, clears entire cache.
+    
+    Returns:
+        int: Number of entries cleared
+    """
+    if backend is None:
+        # Clear entire cache
+        count = len(cache)
+        cache.clear()
+        print(f"Cleared entire cache: {count} entries")
+        return count
+    
+    # Clear only entries for specific backend
+    # We need to iterate through cache and check each entry
+    keys_to_delete = []
+    for key in cache.iterkeys():
+        try:
+            response = cache.get(key)
+            # Check if this is a ModelResponse (it should be)
+            if isinstance(response, ModelResponse):
+                # We need to reconstruct what backend was used
+                # Try to regenerate the key with the specified backend
+                test_key = _get_cache_key(
+                    model=response.model,
+                    prompt=response.prompt,
+                    system_prompt=response.system_prompt,
+                    backend=backend,
+                )
+                if test_key == key:
+                    keys_to_delete.append(key)
+        except Exception:
+            # Skip entries that can't be processed
+            continue
+    
+    # Delete the identified keys
+    for key in keys_to_delete:
+        del cache[key]
+    
+    print(f"Cleared {len(keys_to_delete)} entries for backend: {backend}")
+    return len(keys_to_delete)
 
 
 def _build_messages(prompt: str, system_prompt: Optional[str] = None) -> list[dict]:
@@ -204,12 +261,15 @@ def _get_local_model_response_batch(
     temperature: float = 0.0,
     max_tokens: int = 8192,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    backend: InferenceBackend = InferenceBackend.LOCAL,
+    use_cache: bool = True,
 ) -> List[ModelResponse]:
     """
     Get model responses for a batch of prompts using local transformers pipeline.
 
-    The pipeline handles internal batching automatically with the specified batch_size.
-    We pass all prompts at once and let the pipeline chunk them internally.
+    Manually chunks prompts into groups for processing to enable real-time progress tracking.
+    The pipeline internally batches each chunk with the specified batch_size.
+    Each chunk is cached immediately after processing for robustness.
 
     Args:
         model: Model to use
@@ -217,7 +277,9 @@ def _get_local_model_response_batch(
         system_prompt: Optional system prompt
         temperature: Sampling temperature
         max_tokens: Max tokens to generate
-        batch_size: Internal batch size for the pipeline (not the number of prompts!)
+        batch_size: Internal batch size for the pipeline
+        backend: Inference backend (for cache key generation)
+        use_cache: Whether to cache results
     """
     from tqdm import tqdm
 
@@ -228,51 +290,67 @@ def _get_local_model_response_batch(
     # Build messages for all prompts
     messages_batch = [_build_messages(prompt, system_prompt) for prompt in prompts]
 
-    # Generate responses using pipeline with batching
-    # The pipeline will internally batch these into chunks of batch_size
-    print(f"Running LOCAL inference on {len(prompts)} prompts (batch_size={batch_size})...")
-    results = []
-    for result in tqdm(
-        generator(
-            messages_batch,
-            max_new_tokens=max_tokens,
-            temperature=temperature if temperature > 0 else 1.0,
-            do_sample=(temperature > 0),
-            batch_size=batch_size,  # Pipeline's internal batch size
-        ),
-        total=len(prompts),
-        desc="LOCAL inference"
-    ):
-        results.append(result)
+    # Chunk size: 4x the batch_size for good balance between progress visibility and overhead
+    chunk_size = max(batch_size * 4, 1)
+    
+    print(f"Running LOCAL inference on {len(prompts)} prompts (batch_size={batch_size}, chunk_size={chunk_size})...")
+    
+    # Process in chunks to get real-time progress updates and cache each chunk
+    all_model_responses = []
+    with tqdm(total=len(prompts), desc="LOCAL inference") as pbar:
+        for i in range(0, len(messages_batch), chunk_size):
+            chunk_messages = messages_batch[i:i + chunk_size]
+            chunk_prompts = prompts[i:i + chunk_size]
+            
+            # Process this chunk (pipeline will internally batch with batch_size)
+            chunk_results = generator(
+                chunk_messages,
+                max_new_tokens=max_tokens,
+                temperature=temperature if temperature > 0 else 1.0,
+                do_sample=(temperature > 0),
+                batch_size=batch_size,
+            )
+            
+            # Parse results from this chunk into ModelResponse objects
+            chunk_model_responses = []
+            for prompt, result in zip(chunk_prompts, chunk_results):
+                # Extract the generated text
+                generated_text = result[0]["generated_text"]
 
-    # Parse results into ModelResponse objects
-    model_responses = []
-    for prompt, result in zip(prompts, results):
-        # Extract the generated text
-        generated_text = result[0]["generated_text"]
+                # The last message in generated_text should be the assistant's response
+                if isinstance(generated_text, list) and len(generated_text) > len(_build_messages(prompt, system_prompt)):
+                    assistant_message = generated_text[-1]
+                    content = assistant_message.get("content", "")
+                else:
+                    # Fallback: use the whole generated text
+                    content = str(generated_text)
 
-        # The last message in generated_text should be the assistant's response
-        if isinstance(generated_text, list) and len(generated_text) > len(_build_messages(prompt, system_prompt)):
-            assistant_message = generated_text[-1]
-            content = assistant_message.get("content", "")
-        else:
-            # Fallback: use the whole generated text
-            content = str(generated_text)
+                # Hacky parse the response
+                reasoning, content = content.rsplit("final", 1)
+                if reasoning.startswith("analysis"):
+                    reasoning = reasoning[len("analysis"):]
 
-        # Hacky parse the response
-        reasoning, content = content.rsplit("final", 1)
-        if reasoning.startswith("analysis"):
-            reasoning = reasoning[len("analysis"):]
+                model_response = ModelResponse(
+                    response=content,
+                    reasoning=reasoning,
+                    model=model,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                )
+                chunk_model_responses.append(model_response)
+                
+                # Cache this result immediately
+                if use_cache:
+                    cache_key = _get_cache_key(model, prompt, system_prompt, temperature, max_tokens, backend)
+                    cache.set(cache_key, model_response)
+            
+            # Collect responses from this chunk
+            all_model_responses.extend(chunk_model_responses)
+            
+            # Update progress bar by the number of prompts processed in this chunk
+            pbar.update(len(chunk_messages))
 
-        model_responses.append(ModelResponse(
-            response=content,
-            reasoning=reasoning,
-            model=model,
-            prompt=prompt,
-            system_prompt=system_prompt,
-        ))
-
-    return model_responses
+    return all_model_responses
 
 
 def get_model_response(
@@ -329,7 +407,7 @@ def get_model_response(
     miss_responses = []
     if miss_prompts:
         if backend == InferenceBackend.LOCAL and len(miss_prompts) > 1:
-            # Batch inference for LOCAL backend - pipeline handles internal batching
+            # Batch inference for LOCAL backend - caches each chunk internally
             miss_responses = _get_local_model_response_batch(
                 model=model,
                 prompts=miss_prompts,
@@ -337,6 +415,8 @@ def get_model_response(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 batch_size=batch_size,
+                backend=backend,
+                use_cache=use_cache,
             )
         else:
             # Sequential processing for API backend or single miss
@@ -375,9 +455,9 @@ def get_model_response(
 
                 miss_responses.append(response)
 
-        # Cache the new results
-        for idx, response in zip(miss_indices, miss_responses):
-            cache.set(cache_keys[idx], response)
+            # Cache the new results (LOCAL batch caches internally, so only cache for API/single)
+            for idx, response in zip(miss_indices, miss_responses):
+                cache.set(cache_keys[idx], response)
 
     # Step 4: Merge cached + new in original order
     results = []

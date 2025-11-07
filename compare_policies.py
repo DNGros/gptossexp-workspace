@@ -192,8 +192,8 @@ def generate_comparison_table(
         use_cache=use_cache,
         policies=[
             'toxic_chat_claude_1',
-            'toxic_simple',
-            'toxic_known_dataset',
+            #'toxic_simple',
+            #'toxic_known_dataset',
         ],
         sampling_strategy=sampling_strategy,
         backend=backend,
@@ -237,15 +237,21 @@ def generate_comparison_table(
 
 
 def main():
+    sample_size = 500
+    backend = InferenceBackend.LOCAL
+    
     html_table = generate_comparison_table(
-        sample_size=2000, 
+        sample_size=sample_size, 
         use_cache=True, 
         n_bootstrap=1000,
-        sampling_strategy='natural'
+        sampling_strategy='natural',
+        backend=backend,
+        batch_size=DEFAULT_BATCH_SIZE,
     )
     
-    # Save HTML table
-    output_file = Path("workspace/tables/policy_comparison.html")
+    # Save HTML table with sample size and backend in filename
+    backend_name = backend.value.lower()
+    output_file = Path(f"workspace/tables/policy_comparison_n{sample_size}_{backend_name}.html")
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text(html_table)
     
