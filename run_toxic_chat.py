@@ -44,7 +44,7 @@ from sklearn.metrics import precision_score, recall_score, f1_score, confusion_m
 from tqdm import tqdm
 
 from .classify import classify
-from .model_predict import Model
+from .model_predict import Model, InferenceBackend, DEFAULT_BATCH_SIZE
 
 app = typer.Typer()
 
@@ -285,6 +285,44 @@ def print_summary_stats(results_df: pd.DataFrame):
         print(f"  F1 Score: {f1:.4f}")
 
 
+def _create_result_row(row, classification_result, policy: str, model: str):
+    """Helper to create result row dictionary from classification result.
+
+    Args:
+        row: DataFrame row (either from iterrows or itertuples)
+        classification_result: ClassificationResult object
+        policy: Policy name
+        model: Model name
+
+    Returns:
+        dict: Result row dictionary
+    """
+    # Handle both iterrows and itertuples access patterns
+    def get_field(field_name):
+        return getattr(row, field_name, None) or row.get(field_name) if hasattr(row, 'get') else getattr(row, field_name)
+
+    return {
+        'conv_id': get_field('conv_id'),
+        'user_input': get_field('user_input'),
+        'model_output': get_field('model_output'),
+        'human_annotation': get_field('human_annotation'),
+        'toxicity': get_field('toxicity'),
+        'jailbreaking': get_field('jailbreaking'),
+        'openai_moderation': get_field('openai_moderation'),
+        'policy_name': policy,
+        'model_name': model,
+        'predicted_toxic': classification_result.binary_label,
+        'predicted_label': classification_result.fine_grain_label,
+        'parsed_successfully': classification_result.parsed_successfully,
+        'raw_model_response': classification_result.model_response.response,
+        'model_reasoning': classification_result.model_response.reasoning,
+        'model_used': classification_result.model_response.model,
+        'matches_ground_truth': (
+            classification_result.binary_label == (get_field('toxicity') == 1)
+        ),
+    }
+
+
 def run_toxic_chat_evaluation(
     sample_size: int = 20,
     version: Literal['toxicchat0124', 'toxicchat1123'] = 'toxicchat0124',
@@ -293,11 +331,13 @@ def run_toxic_chat_evaluation(
     model: Literal['GPT_OSS_20B', 'GPT_OSS_safeguarded_20B'] = 'GPT_OSS_20B',
     output: Optional[Path] = None,
     use_cache: bool = True,
-    sampling_strategy: SamplingStrategy = SamplingStrategy.NATURAL
+    sampling_strategy: SamplingStrategy = SamplingStrategy.NATURAL,
+    backend: InferenceBackend = InferenceBackend.API,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ):
     """
     Run toxicity classification on ToxicChat dataset.
-    
+
     Args:
         sample_size: Number of examples to sample
         version: Dataset version
@@ -307,7 +347,9 @@ def run_toxic_chat_evaluation(
         output: Optional output path (auto-generated if None)
         use_cache: Whether to load from cache if available
         sampling_strategy: Strategy for sampling (natural/balanced/neyman)
-        
+        backend: Inference backend (API or LOCAL)
+        batch_size: Batch size for LOCAL backend (only used if backend=LOCAL)
+
     Note: The true positive rate is automatically inferred from the full dataset
           before sampling, ensuring accurate weight calculation.
     """
@@ -378,46 +420,38 @@ def run_toxic_chat_evaluation(
         print(f"  Sampled: {(df['toxicity'] == 1).sum()} positive, {(df['toxicity'] == 0).sum()} negative")
     
     print(f"Processing {len(df)} examples...")
-    
-    results = []
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing examples"):
-        classification_result = classify(
-            text=row['user_input'],
-            policy_module=policy_module,
-            model=model_enum
-        )
-        
-        result_row = {
-            'conv_id': row['conv_id'],
-            'user_input': row['user_input'],
-            'model_output': row['model_output'],
-            'human_annotation': row['human_annotation'],
-            'toxicity': row['toxicity'],
-            'jailbreaking': row['jailbreaking'],
-            'openai_moderation': row['openai_moderation'],
-            'policy_name': policy,
-            'model_name': model,
-            'predicted_toxic': classification_result.binary_label,
-            'predicted_label': classification_result.fine_grain_label,
-            'parsed_successfully': classification_result.parsed_successfully,
-            'raw_model_response': classification_result.model_response.response,
-            'model_reasoning': classification_result.model_response.reasoning,
-            'model_used': classification_result.model_response.model,
-            'matches_ground_truth': (
-                classification_result.binary_label == (row['toxicity'] == 1)
-            ),
-        }
-        
-        results.append(result_row)
+    print(f"Using backend: {backend.value}")
+    if backend == InferenceBackend.LOCAL:
+        print(f"Batch size: {batch_size}")
+
+    # Process all examples at once - let classify() and pipeline handle batching internally
+    classification_results = classify(
+        text=df['user_input'].tolist(),
+        policy_module=policy_module,
+        model=model_enum,
+        backend=backend,
+        use_cache=use_cache,
+        batch_size=batch_size,
+    )
+
+    # Convert to result rows
+    results = [
+        _create_result_row(row, classification_result, policy, model)
+        for row, classification_result in zip(df.itertuples(), classification_results)
+    ]
     
     results_df = pd.DataFrame(results)
-    
+
     # Calculate and add sample weights
     labels = results_df['toxicity'].values
     weights = calculate_sample_weights(labels, true_positive_rate, sampling_strategy)
     results_df['sample_weight'] = weights
     results_df['sampling_strategy'] = sampling_strategy.value
     results_df['true_positive_rate'] = true_positive_rate
+
+    # Add backend column if not API (for backwards compat)
+    if backend != InferenceBackend.API:
+        results_df['backend'] = backend.value
     
     print_summary_stats(results_df)
     
@@ -446,7 +480,9 @@ def run_toxic_chat_evaluation_cli(
     model: Literal['GPT_OSS_20B', 'GPT_OSS_safeguarded_20B'] = typer.Option('GPT_OSS_20B', help='Model to use'),
     output: Optional[Path] = typer.Option(None, help='Output parquet file path (default: auto-generated in results/)'),
     use_cache: bool = typer.Option(True, help='Load from cache if file exists'),
-    sampling_strategy: SamplingStrategy = typer.Option(SamplingStrategy.NATURAL, help='Sampling strategy (natural/balanced/neyman)')
+    sampling_strategy: SamplingStrategy = typer.Option(SamplingStrategy.NATURAL, help='Sampling strategy (natural/balanced/neyman)'),
+    backend: InferenceBackend = typer.Option(InferenceBackend.API, help='Inference backend (api/local)'),
+    batch_size: int = typer.Option(DEFAULT_BATCH_SIZE, help='Batch size for LOCAL backend'),
 ):
     """CLI wrapper for run_toxic_chat_evaluation."""
     return run_toxic_chat_evaluation(
@@ -457,7 +493,9 @@ def run_toxic_chat_evaluation_cli(
         model=model,
         output=output,
         use_cache=use_cache,
-        sampling_strategy=sampling_strategy
+        sampling_strategy=sampling_strategy,
+        backend=backend,
+        batch_size=batch_size,
     )
 
 

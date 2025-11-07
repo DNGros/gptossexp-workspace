@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 import re
 from pathlib import Path
-from .model_predict import ModelResponse, get_model_response, Model, InferenceBackend
+from typing import Union, List
+from .model_predict import ModelResponse, get_model_response, Model, InferenceBackend, DEFAULT_BATCH_SIZE
 
 
 @dataclass
@@ -52,46 +53,61 @@ def _default_parse(response: ModelResponse) -> ClassificationResult:
 
 
 def classify(
-    text: str,
+    text: Union[str, List[str]],
     policy_module,
     model: Model = Model.GPT_OSS_20B,
     backend: InferenceBackend = InferenceBackend.API,
     use_cache: bool = True,
-) -> ClassificationResult:
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> Union[ClassificationResult, List[ClassificationResult]]:
     """
     Classify text using a policy module.
-    
+
+    Accepts either a single text or a list of texts for batch processing.
+
     Args:
-        text: Text to classify
+        text: Text to classify (single string or list of strings)
         policy_module: Python module from policies/ (e.g., policies.spam)
         model: Model to use for classification
         backend: Inference backend (API or LOCAL)
-    
+        use_cache: Whether to use cache
+        batch_size: Batch size for LOCAL backend
+
     Returns:
-        ClassificationResult with binary label, fine-grain label, and metadata
+        ClassificationResult (single) or List[ClassificationResult] (batch)
     """
+    # Detect if batch or single
+    is_batch = isinstance(text, list)
+    texts = text if is_batch else [text]
+
     # Load the markdown file from the policy module's directory
     module_path = Path(policy_module.__file__).parent
     module_name = policy_module.__name__.split('.')[-1]
     md_path = module_path / f"{module_name}.md"
-    
+
     if not md_path.exists():
         raise FileNotFoundError(f"Policy file not found: {md_path}")
-    
+
     system_prompt = md_path.read_text()
-    
-    # Get model response
-    response = get_model_response(
+
+    # Get model responses (batched if list)
+    responses = get_model_response(
         model=model,
-        prompt=text,
+        prompt=texts,
         system_prompt=system_prompt,
         backend=backend,
         use_cache=use_cache,
+        batch_size=batch_size,
     )
-    
+
+    # Normalize to list for processing
+    if not is_batch:
+        responses = [responses]
+
     # Use custom parser if available, otherwise default
-    if hasattr(policy_module, 'parse'):
-        return policy_module.parse(response)
-    else:
-        return _default_parse(response)
+    parser = policy_module.parse if hasattr(policy_module, 'parse') else _default_parse
+    results = [parser(response) for response in responses]
+
+    # Return single or batch based on input
+    return results if is_batch else results[0]
 
