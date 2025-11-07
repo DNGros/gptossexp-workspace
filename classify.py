@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import re
 from pathlib import Path
 from typing import Union, List
-from .model_predict import ModelResponse, get_model_response, Model, InferenceBackend
+from .model_predict import ModelResponse, get_model_response, Model, InferenceBackend, DEFAULT_BATCH_SIZE
 
 
 @dataclass
@@ -58,6 +58,7 @@ def classify(
     model: Model = Model.GPT_OSS_20B,
     backend: InferenceBackend = InferenceBackend.API,
     use_cache: bool = True,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> Union[ClassificationResult, List[ClassificationResult]]:
     """
     Classify text using a policy module.
@@ -70,6 +71,7 @@ def classify(
         model: Model to use for classification
         backend: Inference backend (API or LOCAL)
         use_cache: Whether to use cache
+        batch_size: Batch size for LOCAL backend
 
     Returns:
         ClassificationResult (single) or List[ClassificationResult] (batch)
@@ -95,6 +97,7 @@ def classify(
         system_prompt=system_prompt,
         backend=backend,
         use_cache=use_cache,
+        batch_size=batch_size,
     )
 
     # Normalize to list for processing

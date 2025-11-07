@@ -7,6 +7,9 @@ from enum import StrEnum
 import diskcache
 from typing import Optional, Union, List
 
+# Default batch size for LOCAL backend inference
+DEFAULT_BATCH_SIZE = 8
+
 class Model(StrEnum):
     GPT_OSS_20B = "openai/gpt-oss-20b"
     GPT_OSS_safeguarded_20B = "openai/gpt-oss-safeguard-20b"
@@ -27,20 +30,30 @@ class LocalModelCache:
     """Singleton cache for local pipeline generators to avoid reloading."""
     _instance = None
     _pipelines = {}
-    
+    _current_model = None
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
-    
+
     def get_pipeline(self, model_id: str):
-        """Get or load text-generation pipeline."""
+        """Get or load text-generation pipeline.
+
+        Only keeps one model in memory at a time to conserve GPU memory.
+        If switching models, clears the previous model from GPU.
+        """
+        # If switching to a different model, clear the old one
+        if self._current_model is not None and self._current_model != model_id:
+            print(f"Switching models: unloading {self._current_model}")
+            self._unload_current_model()
+
         if model_id not in self._pipelines:
             print(f"Loading model pipeline: {model_id} (this may take a while...)")
-            
+
             # Lazy import to avoid loading transformers unless needed
             from transformers import pipeline
-            
+
             self._pipelines[model_id] = pipeline(
                 "text-generation",
                 model=model_id,
@@ -48,12 +61,36 @@ class LocalModelCache:
                 device_map="auto",  # Automatically place on available GPUs
             )
             print(f"Pipeline loaded successfully")
-        
+
+        self._current_model = model_id
         return self._pipelines[model_id]
-    
+
+    def _unload_current_model(self):
+        """Unload current model and clear GPU memory."""
+        if self._current_model and self._current_model in self._pipelines:
+            try:
+                import torch
+                import gc
+
+                # Delete the pipeline
+                del self._pipelines[self._current_model]
+
+                # Clear CUDA cache
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                # Force garbage collection
+                gc.collect()
+
+                print(f"Cleared {self._current_model} from GPU memory")
+            except Exception as e:
+                print(f"Warning: Error clearing model: {e}")
+
     def clear(self):
-        """Clear cached pipelines to free memory."""
+        """Clear all cached pipelines to free memory."""
+        self._unload_current_model()
         self._pipelines.clear()
+        self._current_model = None
 
 
 @dataclass
@@ -166,12 +203,24 @@ def _get_local_model_response_batch(
     system_prompt: Optional[str] = None,
     temperature: float = 0.0,
     max_tokens: int = 8192,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> List[ModelResponse]:
     """
     Get model responses for a batch of prompts using local transformers pipeline.
 
-    Uses the high-level pipeline API which handles chat templates and batching automatically.
+    The pipeline handles internal batching automatically with the specified batch_size.
+    We pass all prompts at once and let the pipeline chunk them internally.
+
+    Args:
+        model: Model to use
+        prompts: List of prompts to process
+        system_prompt: Optional system prompt
+        temperature: Sampling temperature
+        max_tokens: Max tokens to generate
+        batch_size: Internal batch size for the pipeline (not the number of prompts!)
     """
+    from tqdm import tqdm
+
     # Get cached pipeline
     model_cache = LocalModelCache()
     generator = model_cache.get_pipeline(str(model))
@@ -180,13 +229,21 @@ def _get_local_model_response_batch(
     messages_batch = [_build_messages(prompt, system_prompt) for prompt in prompts]
 
     # Generate responses using pipeline with batching
-    results = generator(
-        messages_batch,
-        max_new_tokens=max_tokens,
-        temperature=temperature if temperature > 0 else 1.0,
-        do_sample=(temperature > 0),
-        batch_size=len(prompts),  # Explicit batch size
-    )
+    # The pipeline will internally batch these into chunks of batch_size
+    print(f"Running LOCAL inference on {len(prompts)} prompts (batch_size={batch_size})...")
+    results = []
+    for result in tqdm(
+        generator(
+            messages_batch,
+            max_new_tokens=max_tokens,
+            temperature=temperature if temperature > 0 else 1.0,
+            do_sample=(temperature > 0),
+            batch_size=batch_size,  # Pipeline's internal batch size
+        ),
+        total=len(prompts),
+        desc="LOCAL inference"
+    ):
+        results.append(result)
 
     # Parse results into ModelResponse objects
     model_responses = []
@@ -226,6 +283,7 @@ def get_model_response(
     max_tokens: int = 8192,
     use_cache: bool = True,
     backend: InferenceBackend = InferenceBackend.API,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> Union[ModelResponse, List[ModelResponse]]:
     """
     Get model response using specified backend.
@@ -241,10 +299,13 @@ def get_model_response(
         max_tokens: Maximum tokens to generate
         use_cache: Whether to use disk cache
         backend: Inference backend (API or LOCAL)
+        batch_size: Batch size for LOCAL backend (pipeline's internal batching)
 
     Returns:
         ModelResponse (single) or List[ModelResponse] (batch)
     """
+    from tqdm import tqdm
+
     # Detect if batch or single
     is_batch = isinstance(prompt, list)
     prompts = prompt if is_batch else [prompt]
@@ -268,17 +329,19 @@ def get_model_response(
     miss_responses = []
     if miss_prompts:
         if backend == InferenceBackend.LOCAL and len(miss_prompts) > 1:
-            # Batch inference for LOCAL backend
+            # Batch inference for LOCAL backend - pipeline handles internal batching
             miss_responses = _get_local_model_response_batch(
                 model=model,
                 prompts=miss_prompts,
                 system_prompt=system_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                batch_size=batch_size,
             )
         else:
             # Sequential processing for API backend or single miss
-            for miss_prompt in miss_prompts:
+            desc = "API inference" if backend == InferenceBackend.API else "LOCAL inference"
+            for miss_prompt in tqdm(miss_prompts, desc=desc, disable=len(miss_prompts) == 1):
                 if backend == InferenceBackend.LOCAL:
                     response = _get_local_model_response(
                         model=model,

@@ -1,7 +1,7 @@
 import pandas as pd
 from pathlib import Path
 from workspace.run_toxic_chat import run_toxic_chat_evaluation
-from workspace.model_predict import Model, InferenceBackend
+from workspace.model_predict import Model, InferenceBackend, DEFAULT_BATCH_SIZE
 from workspace.common.htmlrendering import generate_html_table
 from workspace.metrics import (
     calculate_classification_metrics_with_ci,
@@ -53,7 +53,7 @@ def run_model_evaluations(
     policy: str = 'toxic_chat_claude_1',
     sampling_strategy: str = 'natural',
     backend: InferenceBackend = InferenceBackend.LOCAL,
-    batch_size: int = 8,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ):
     """Run toxic chat evaluation for both base and safeguarded models.
 
@@ -110,7 +110,7 @@ def run_policy_evaluations(
     policies: list = None,
     sampling_strategy: str = 'natural',
     backend: InferenceBackend = InferenceBackend.LOCAL,
-    batch_size: int = 8,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ):
     """Run toxic chat evaluation for multiple policies on both models.
 
@@ -152,7 +152,7 @@ def run_all_policies(
     use_cache: bool = True,
     sampling_strategy: str = 'natural',
     backend: InferenceBackend = InferenceBackend.LOCAL,
-    batch_size: int = 8,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ):
     """Run evaluations for both models and concatenate results."""
     base_df, safeguard_df = run_model_evaluations(
@@ -171,7 +171,7 @@ def generate_comparison_table(
     n_bootstrap: int = 1000,
     sampling_strategy: str = 'natural',
     backend: InferenceBackend = InferenceBackend.LOCAL,
-    batch_size: int = 8,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ):
     """Generate HTML table comparing policies across models.
 
