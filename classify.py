@@ -91,6 +91,7 @@ def classify(
     system_prompt = md_path.read_text()
 
     # Get model responses (batched if list)
+    # Since texts is always a list, get_model_response will return a list
     responses = get_model_response(
         model=model,
         prompt=texts,
@@ -100,9 +101,7 @@ def classify(
         batch_size=batch_size,
     )
 
-    # Normalize to list for processing
-    if not is_batch:
-        responses = [responses]
+    # responses is already a list since we always pass texts as a list
 
     # Use custom parser if available, otherwise default
     parser = policy_module.parse if hasattr(policy_module, 'parse') else _default_parse
