@@ -10,7 +10,7 @@ from workspace.hackathon.analyize_comparison import compare_results, print_analy
 
 
 cur_path = Path(__file__).parent
-controversial_path = cur_path / "controversial.jsonl"
+controversial_path = cur_path / "controversial-micro.jsonl"
 results_path = cur_path / "results.json"
 
 def read_all_controversial():

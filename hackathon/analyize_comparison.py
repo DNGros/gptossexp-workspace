@@ -77,6 +77,47 @@ def compare_results(results: list[dict], model1_key: str = None, model2_key: str
     }
     
     # =========================================================================
+    # 1b. Test for specific Likert value differences (e.g., proportion of "3"s)
+    # =========================================================================
+    # Test if proportion of a specific Likert value differs between models
+    likert_value_tests = {}
+    for likert_val in [1, 2, 3, 4, 5]:
+        n1 = np.sum(model1_likert == likert_val)
+        n2 = np.sum(model2_likert == likert_val)
+        total1 = len(model1_likert)
+        total2 = len(model2_likert)
+        p1 = n1 / total1 if total1 > 0 else 0
+        p2 = n2 / total2 if total2 > 0 else 0
+        
+        # Two-proportion z-test
+        # H0: p1 = p2, H1: p1 != p2
+        if total1 > 0 and total2 > 0:
+            # Pooled proportion for standard error
+            p_pooled = (n1 + n2) / (total1 + total2)
+            se = np.sqrt(p_pooled * (1 - p_pooled) * (1/total1 + 1/total2))
+            if se > 0:
+                z_stat = (p1 - p2) / se
+                p_value = 2 * (1 - stats.norm.cdf(abs(z_stat)))
+            else:
+                z_stat = 0
+                p_value = 1.0
+        else:
+            z_stat = np.nan
+            p_value = np.nan
+        
+        likert_value_tests[likert_val] = {
+            "model1_count": int(n1),
+            "model1_proportion": float(p1),
+            "model2_count": int(n2),
+            "model2_proportion": float(p2),
+            "z_statistic": float(z_stat) if not np.isnan(z_stat) else None,
+            "p_value": float(p_value) if not np.isnan(p_value) else None,
+            "difference": float(p2 - p1),  # model2 - model1
+        }
+    
+    analysis["likert_value_tests"] = likert_value_tests
+    
+    # =========================================================================
     # 2. Typical differences
     # =========================================================================
     differences = model1_scores - model2_scores
@@ -266,6 +307,28 @@ def print_analysis(analysis: dict):
         print(f"  Mean (0-1 scale): {m['mean']:.3f}")
         print(f"  Mean (1-5 scale): {m['mean_likert']:.2f}")
         print(f"  Std (0-1 scale): {m['std']:.3f}")
+    
+    print("\n" + "=" * 70)
+    print("PROPORTION TESTS FOR EACH LIKERT VALUE")
+    print("=" * 70)
+    
+    lvt = analysis["likert_value_tests"]
+    print("\nTesting if proportions differ between models (two-proportion z-test):")
+    for likert_val in sorted(lvt.keys()):
+        test = lvt[likert_val]
+        print(f"\nLikert value {likert_val}:")
+        print(f"  {model1_name}: {test['model1_count']} ({test['model1_proportion']:.1%})")
+        print(f"  {model2_name}: {test['model2_count']} ({test['model2_proportion']:.1%})")
+        print(f"  Difference ({model2_name} - {model1_name}): {test['difference']:+.1%}")
+        if test['p_value'] is not None:
+            p = test['p_value']
+            sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else ""
+            print(f"  p-value: {p:.4f} {sig}")
+            if p < 0.05:
+                if test['difference'] > 0:
+                    print(f"  → {model2_name} has significantly MORE {likert_val}s")
+                else:
+                    print(f"  → {model1_name} has significantly MORE {likert_val}s")
     
     print("\n" + "=" * 70)
     print("DIFFERENCES BETWEEN MODELS")

@@ -227,6 +227,7 @@ def _build_messages_harmony(
         ),
         Message.from_role_and_content(Role.USER, prompt),
     ]
+    print(conv_messages)
     messages = []
     for pre_msg in conv_messages:
         tokens = enc.render(pre_msg)
