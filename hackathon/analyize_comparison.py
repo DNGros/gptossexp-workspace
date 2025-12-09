@@ -4,6 +4,8 @@ import pandas as pd
 from scipy import stats
 from collections import Counter
 import pingouin as pg
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 
 def compare_results(results: list[dict], model1_key: str = None, model2_key: str = None) -> dict:
@@ -291,6 +293,103 @@ def _interpret_icc(icc: float) -> str:
         return "Excellent reliability"
 
 
+def plot_likert_distribution(analysis: dict, output_path: str = None, figsize=(8, 5)):
+    """
+    Create a bar plot comparing Likert rating distributions between two models.
+    Tufte-style: minimal ink, transparent background, clean design.
+    
+    Args:
+        analysis: Dictionary from compare_results()
+        output_path: Path to save figure (if None, displays instead)
+        figsize: Figure size tuple (width, height)
+    
+    Returns:
+        matplotlib figure object
+    """
+    model1_name = _short_model_name(analysis["distribution"]["model1"]["name"])
+    model2_name = _short_model_name(analysis["distribution"]["model2"]["name"])
+    
+    model1_counts = analysis["distribution"]["model1"]["counts"]
+    model2_counts = analysis["distribution"]["model2"]["counts"]
+    
+    # Get total counts for each model to compute proportions
+    model1_total = sum(model1_counts.values())
+    model2_total = sum(model2_counts.values())
+    
+    # Prepare data for all Likert values (1-5)
+    likert_values = [1, 2, 3, 4, 5]
+    model1_props = [model1_counts.get(v, 0) / model1_total for v in likert_values]
+    model2_props = [model2_counts.get(v, 0) / model2_total for v in likert_values]
+    
+    # Create figure with transparent background
+    fig, ax = plt.subplots(figsize=figsize, facecolor='none')
+    ax.set_facecolor('none')
+    
+    # Set bar width and positions
+    bar_width = 0.35
+    x = np.arange(len(likert_values))
+    
+    # Tufte-style colors: muted, distinguishable
+    color1 = '#4C72B0'  # Muted blue
+    color2 = '#C44E52'  # Muted red
+    
+    # Create bars with minimal styling
+    bars1 = ax.bar(x - bar_width/2, model1_props, bar_width, 
+                   label=model1_name, alpha=0.85, color=color1,
+                   edgecolor='none')
+    bars2 = ax.bar(x + bar_width/2, model2_props, bar_width,
+                   label=model2_name, alpha=0.85, color=color2,
+                   edgecolor='none')
+    
+    # Minimal axis styling
+    ax.set_xlabel('Likert Rating', fontsize=11)
+    ax.set_ylabel('Proportion', fontsize=11)
+    ax.set_xticks(x)
+    ax.set_xticklabels(likert_values)
+    
+    # Remove top and right spines (Tufte style)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(0.5)
+    ax.spines['bottom'].set_linewidth(0.5)
+    
+    # Subtle grid on y-axis only
+    ax.grid(axis='y', alpha=0.2, linestyle='-', linewidth=0.5, color='gray')
+    ax.set_axisbelow(True)  # Grid behind bars
+    
+    # Legend with minimal styling
+    legend = ax.legend(fontsize=10, frameon=False, loc='upper left')
+    
+    # Add value labels on bars (only for significant values)
+    def add_value_labels(bars, props):
+        for bar, prop in zip(bars, props):
+            height = bar.get_height()
+            if height > 0.05:  # Only show label if bar is visible enough
+                ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                       f'{prop:.0%}',
+                       ha='center', va='bottom', fontsize=9, color='#333333')
+    
+    add_value_labels(bars1, model1_props)
+    add_value_labels(bars2, model2_props)
+    
+    # Set y-axis limits with some padding
+    ax.set_ylim(0, max(max(model1_props), max(model2_props)) * 1.15)
+    
+    # Format y-axis as percentages
+    from matplotlib.ticker import PercentFormatter
+    ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+    
+    plt.tight_layout()
+    
+    if output_path:
+        # Save as SVG with transparent background
+        plt.savefig(output_path, format='svg', bbox_inches='tight', 
+                   facecolor='none', edgecolor='none')
+        print(f"Figure saved to: {output_path}")
+    
+    return fig
+
+
 def print_analysis(analysis: dict):
     """Pretty print the analysis results."""
     model1_name = _short_model_name(analysis["distribution"]["model1"]["name"])
@@ -387,12 +486,29 @@ def print_analysis(analysis: dict):
 
 
 if __name__ == "__main__":
-    # Example usage with mock data for testing
-    mock_results = [
-        {"text": "Test 1", "model_gpt-oss-20b": 0.5, "model_gpt-oss-safeguarded-20b": 0.75},
-        {"text": "Test 2", "model_gpt-oss-20b": 0.25, "model_gpt-oss-safeguarded-20b": 0.25},
-        {"text": "Test 3", "model_gpt-oss-20b": 1.0, "model_gpt-oss-safeguarded-20b": 0.5},
-    ]
+    import json
+    import sys
     
-    analysis = compare_results(mock_results)
+    # Load real results if available
+    try:
+        with open("results.json", "r") as f:
+            results = json.load(f)
+        print(f"Loaded {len(results)} results from results.json")
+    except FileNotFoundError:
+        print("results.json not found, using mock data")
+        results = [
+            {"text": "Test 1", "model_openai/gpt-oss-20b": 0.5, "model_openai/gpt-oss-safeguard-20b": 0.75},
+            {"text": "Test 2", "model_openai/gpt-oss-20b": 0.25, "model_openai/gpt-oss-safeguard-20b": 0.25},
+            {"text": "Test 3", "model_openai/gpt-oss-20b": 1.0, "model_openai/gpt-oss-safeguard-20b": 0.5},
+        ]
+    
+    # Run analysis
+    analysis = compare_results(results)
     print_analysis(analysis)
+    
+    # Create and save figure
+    print("\n" + "=" * 70)
+    print("CREATING FIGURE")
+    print("=" * 70)
+    fig = plot_likert_distribution(analysis, output_path="likert_distribution_comparison.svg")
+    plt.show()
