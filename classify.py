@@ -9,6 +9,7 @@ from .model_predict import ModelResponse, get_model_response, Model, InferenceBa
 class ClassificationResult:
     binary_label: bool  # True = violates policy, False = ok
     fine_grain_label: dict | str | None
+    float_label: float | None
     metadata: dict
     model_response: ModelResponse
     parsed_successfully: bool  # True if parser successfully extracted meaningful information
@@ -46,6 +47,7 @@ def _default_parse(response: ModelResponse) -> ClassificationResult:
     return ClassificationResult(
         binary_label=binary_label,
         fine_grain_label=fine_grain,
+        float_label=1.0 if binary_label else 0.0,
         metadata=metadata,
         model_response=response,
         parsed_successfully=parsed_successfully
@@ -56,7 +58,7 @@ def classify(
     text: Union[str, List[str]],
     policy_module,
     model: Model = Model.GPT_OSS_20B,
-    backend: InferenceBackend = InferenceBackend.API,
+    backend: InferenceBackend = InferenceBackend.API_INJECT_HARMONY,
     use_cache: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> Union[ClassificationResult, List[ClassificationResult]]:
@@ -95,7 +97,7 @@ def classify(
     responses = get_model_response(
         model=model,
         prompt=texts,
-        system_prompt=system_prompt,
+        instructions=system_prompt,
         backend=backend,
         use_cache=use_cache,
         batch_size=batch_size,

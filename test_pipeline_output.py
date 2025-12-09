@@ -30,7 +30,7 @@ def test_pipeline_output():
     print(get_model_response(
         model="openai/gpt-oss-20b",
         prompt="What is 17 * 23? Show your reasoning step by step.",
-        system_prompt="You are a helpful math tutor. Show your work.",
+        instructions="You are a helpful math tutor. Show your work.",
         max_tokens=5000,
         temperature=0,
         use_cache=False,

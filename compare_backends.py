@@ -1,14 +1,16 @@
 """
-Compare API vs LOCAL inference backends on ToxicChat dataset.
+Compare two inference backends on ToxicChat dataset.
 
-This script validates that both backends produce consistent results by:
+This script compares two backends by:
 1. Sampling N examples from ToxicChat
-2. Running classification with both API and LOCAL backends
-3. Comparing results field-by-field
-4. Generating a detailed comparison report
+2. Running classification with both backends on the same examples
+3. Comparing results field-by-field (agreement metrics)
+4. Evaluating ground truth performance for each backend
+5. Generating a detailed comparison report
 
 Usage:
-    python -m workspace.compare_backends --sample-size 100 --policy toxic_simple
+    python -m workspace.compare_backends --sample-size 100 --policy toxic_simple \
+        --backend1 API --backend2 API_INJECT_HARMONY
 """
 
 import pandas as pd
@@ -21,6 +23,8 @@ import typer
 from .classify import classify
 from .model_predict import Model, InferenceBackend
 from .run_toxic_chat import get_policy_module
+from .metrics import calculate_classification_metrics_with_ci, calculate_proportion_with_ci, format_metric_with_ci
+from .common.htmlrendering import generate_html_table
 
 app = typer.Typer()
 
@@ -34,74 +38,85 @@ def compare_single_example(
     text: str,
     policy_module,
     model: Model,
+    backend1: InferenceBackend,
+    backend2: InferenceBackend,
     ground_truth: int = None,
 ) -> dict:
     """
     Run classification on a single example with both backends and compare.
     
+    Args:
+        text: Input text to classify
+        policy_module: Policy module to use
+        model: Model to use
+        backend1: First backend to compare
+        backend2: Second backend to compare
+        ground_truth: Optional ground truth label
+    
     Returns:
         dict with comparison results
     """
-    # Run with API backend
-    api_result = classify(
+    # Run with first backend
+    result1 = classify(
         text=text,
         policy_module=policy_module,
         model=model,
-        backend=InferenceBackend.API,
+        backend=backend1,
     )
     
-    # Run with LOCAL backend
-    local_result = classify(
+    # Run with second backend
+    result2 = classify(
         text=text,
         policy_module=policy_module,
         model=model,
-        backend=InferenceBackend.LOCAL,
+        backend=backend2,
         use_cache=False,
     )
     
     # Compare results
-    binary_match = api_result.binary_label == local_result.binary_label
-    fine_grain_match = api_result.fine_grain_label == local_result.fine_grain_label
+    binary_match = result1.binary_label == result2.binary_label
+    fine_grain_match = result1.fine_grain_label == result2.fine_grain_label
     
     # Calculate text similarities
     response_similarity = calculate_text_similarity(
-        api_result.model_response.response,
-        local_result.model_response.response
+        result1.model_response.response,
+        result2.model_response.response
     )
     
     reasoning_similarity = calculate_text_similarity(
-        api_result.model_response.reasoning or "",
-        local_result.model_response.reasoning or ""
+        result1.model_response.reasoning or "",
+        result2.model_response.reasoning or ""
     )
     
+    # Use generic column names that will be renamed later
     comparison = {
         'text': text,
         'ground_truth': ground_truth,
         
-        # API results
-        'api_binary_label': api_result.binary_label,
-        'api_fine_grain_label': api_result.fine_grain_label,
-        'api_parsed_successfully': api_result.parsed_successfully,
-        'api_response': api_result.model_response.response,
-        'api_reasoning': api_result.model_response.reasoning,
-        'api_response_length': len(api_result.model_response.response),
-        'api_reasoning_length': len(api_result.model_response.reasoning or ""),
+        # Backend 1 results
+        'backend1_binary_label': result1.binary_label,
+        'backend1_fine_grain_label': result1.fine_grain_label,
+        'backend1_parsed_successfully': result1.parsed_successfully,
+        'backend1_response': result1.model_response.response,
+        'backend1_reasoning': result1.model_response.reasoning,
+        'backend1_response_length': len(result1.model_response.response),
+        'backend1_reasoning_length': len(result1.model_response.reasoning or ""),
         
-        # LOCAL results
-        'local_binary_label': local_result.binary_label,
-        'local_fine_grain_label': local_result.fine_grain_label,
-        'local_parsed_successfully': local_result.parsed_successfully,
-        'local_response': local_result.model_response.response,
-        'local_reasoning': local_result.model_response.reasoning,
-        'local_response_length': len(local_result.model_response.response),
-        'local_reasoning_length': len(local_result.model_response.reasoning or ""),
+        # Backend 2 results
+        'backend2_binary_label': result2.binary_label,
+        'backend2_fine_grain_label': result2.fine_grain_label,
+        'backend2_parsed_successfully': result2.parsed_successfully,
+        'backend2_response': result2.model_response.response,
+        'backend2_reasoning': result2.model_response.reasoning,
+        'backend2_response_length': len(result2.model_response.response),
+        'backend2_reasoning_length': len(result2.model_response.reasoning or ""),
         
         # Comparisons
         'binary_match': binary_match,
         'fine_grain_match': fine_grain_match,
         'response_similarity': response_similarity,
         'reasoning_similarity': reasoning_similarity,
-        'both_parsed': api_result.parsed_successfully and local_result.parsed_successfully,
+        'both_parsed': result1.parsed_successfully and result2.parsed_successfully,
     }
     
     return comparison
@@ -111,9 +126,12 @@ def run_backend_comparison(
     sample_size: int = 100,
     policy: str = 'toxic_simple',
     model: str = 'GPT_OSS_20B',
+    backend1: InferenceBackend = InferenceBackend.API,
+    backend2: InferenceBackend = InferenceBackend.API_INJECT_HARMONY,
     version: str = 'toxicchat0124',
     split: str = 'test',
     output_dir: Path = None,
+    n_bootstrap: int = 1000,
 ) -> pd.DataFrame:
     """
     Run backend comparison on ToxicChat dataset.
@@ -122,15 +140,21 @@ def run_backend_comparison(
         sample_size: Number of examples to compare
         policy: Policy name to use
         model: Model to use
+        backend1: First backend to compare
+        backend2: Second backend to compare
         version: Dataset version
         split: Dataset split
         output_dir: Directory to save results (default: workspace/results/backend_comparison/)
+        n_bootstrap: Number of bootstrap iterations for confidence intervals
     
     Returns:
         DataFrame with comparison results
     """
+    backend1_name = backend1.value.upper().replace('_', ' ')
+    backend2_name = backend2.value.upper().replace('_', ' ')
+    
     print("="*70)
-    print("BACKEND COMPARISON: API vs LOCAL")
+    print(f"BACKEND COMPARISON: {backend1_name} vs {backend2_name}")
     print("="*70)
     print(f"Policy: {policy}")
     print(f"Model: {model}")
@@ -147,27 +171,22 @@ def run_backend_comparison(
     dataset = load_dataset("lmsys/toxic-chat", version, split=split)
     df = dataset.to_pandas()
     
-    # Sample examples (stratified by toxicity for balanced coverage)
+    # Sample examples according to natural distribution
+    # Use deterministic shuffle so larger samples include smaller ones
     print(f"Sampling {sample_size} examples...")
-    toxic_examples = df[df['toxicity'] == 1].sample(
-        n=min(sample_size // 2, len(df[df['toxicity'] == 1])),
-        random_state=42
-    )
-    non_toxic_examples = df[df['toxicity'] == 0].sample(
-        n=min(sample_size // 2, len(df[df['toxicity'] == 0])),
-        random_state=42
-    )
-    sampled_df = pd.concat([toxic_examples, non_toxic_examples]).sample(
-        frac=1.0, random_state=42
-    ).reset_index(drop=True)
+    df_shuffled = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
+    sampled_df = df_shuffled.head(min(sample_size, len(df)))
     
     print(f"Sampled: {(sampled_df['toxicity'] == 1).sum()} toxic, "
-          f"{(sampled_df['toxicity'] == 0).sum()} non-toxic")
+          f"{(sampled_df['toxicity'] == 0).sum()} non-toxic "
+          f"({(sampled_df['toxicity'] == 1).sum() / len(sampled_df):.1%} toxic)")
     print()
     
     # Run comparisons
     print("Running comparisons (this will take a while)...")
-    print("Note: First LOCAL inference will be slow (loading model)")
+    if backend1 in (InferenceBackend.LOCAL, InferenceBackend.LOCAL_INJECT_HARMONY) or \
+       backend2 in (InferenceBackend.LOCAL, InferenceBackend.LOCAL_INJECT_HARMONY):
+        print("Note: First LOCAL inference will be slow (loading model)")
     print()
     
     results = []
@@ -177,6 +196,8 @@ def run_backend_comparison(
                 text=row['user_input'],
                 policy_module=policy_module,
                 model=model_enum,
+                backend1=backend1,
+                backend2=backend2,
                 ground_truth=row['toxicity'],
             )
             comparison['conv_id'] = row['conv_id']
@@ -189,27 +210,121 @@ def run_backend_comparison(
     results_df = pd.DataFrame(results)
     
     # Print summary
-    print_comparison_summary(results_df)
+    print_comparison_summary(results_df, backend1_name, backend2_name, n_bootstrap)
     
     # Save results
     if output_dir is None:
         output_dir = Path(__file__).parent / "results" / "backend_comparison"
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    output_file = output_dir / f"{policy}_{model}_n{sample_size}.parquet"
+    backend1_short = backend1.value
+    backend2_short = backend2.value
+    
+    # Save parquet file
+    output_file = output_dir / f"{policy}_{model}_{backend1_short}_vs_{backend2_short}_n{sample_size}.parquet"
     results_df.to_parquet(output_file, index=False)
     print(f"\nResults saved to: {output_file}")
+    
+    # Generate and save HTML table
+    html_table = generate_backend_comparison_table(
+        df=results_df,
+        backend1=backend1,
+        backend2=backend2,
+        policy=policy,
+        model=model,
+        sample_size=sample_size,
+        n_bootstrap=n_bootstrap,
+    )
+    
+    table_dir = Path(__file__).parent / "tables"
+    table_dir.mkdir(parents=True, exist_ok=True)
+    table_file = table_dir / f"backend_comparison_{policy}_{model}_{backend1_short}_vs_{backend2_short}_n{sample_size}.html"
+    table_file.write_text(html_table)
+    print(f"HTML table saved to: {table_file}")
     
     return results_df
 
 
-def print_comparison_summary(df: pd.DataFrame):
-    """Print summary statistics for backend comparison."""
+def print_comparison_summary(df: pd.DataFrame, backend1_name: str, backend2_name: str, n_bootstrap: int = 1000):
+    """Print summary statistics for backend comparison.
+    
+    Args:
+        df: DataFrame with comparison results
+        backend1_name: Display name for first backend
+        backend2_name: Display name for second backend
+        n_bootstrap: Number of bootstrap iterations for confidence intervals
+    """
     print("\n" + "="*70)
     print("COMPARISON SUMMARY")
     print("="*70)
     
     total = len(df)
+    
+    # ========== GROUND TRUTH PERFORMANCE ==========
+    print("\n" + "="*70)
+    print("GROUND TRUTH PERFORMANCE")
+    print("="*70)
+    
+    # Prepare data for metrics calculation
+    # Map binary labels to 0/1 for sklearn metrics
+    backend1_pred = df['backend1_binary_label'].fillna(False).astype(int).values
+    backend2_pred = df['backend2_binary_label'].fillna(False).astype(int).values
+    y_true = df['ground_truth'].astype(int).values
+    
+    # Calculate metrics for backend1
+    backend1_metrics = calculate_classification_metrics_with_ci(
+        y_true, backend1_pred, n_bootstrap=n_bootstrap
+    )
+    backend1_parse_rate = calculate_proportion_with_ci(
+        df['backend1_parsed_successfully'].values, n_bootstrap=n_bootstrap
+    )
+    
+    # Calculate metrics for backend2
+    backend2_metrics = calculate_classification_metrics_with_ci(
+        y_true, backend2_pred, n_bootstrap=n_bootstrap
+    )
+    backend2_parse_rate = calculate_proportion_with_ci(
+        df['backend2_parsed_successfully'].values, n_bootstrap=n_bootstrap
+    )
+    
+    # Print backend1 metrics
+    print(f"\n{backend1_name}:")
+    print(f"  F1:        {format_metric_with_ci(*backend1_metrics['f1'])}")
+    print(f"  Precision: {format_metric_with_ci(*backend1_metrics['precision'])}")
+    print(f"  Recall:    {format_metric_with_ci(*backend1_metrics['recall'])}")
+    print(f"  Parse Rate: {format_metric_with_ci(*backend1_parse_rate, as_percent=True)}")
+    
+    # Print backend2 metrics with deltas
+    print(f"\n{backend2_name}:")
+    backend2_f1_mean, backend2_f1_lower, backend2_f1_upper = backend2_metrics['f1']
+    backend1_f1_mean = backend1_metrics['f1'][0]
+    f1_delta = backend2_f1_mean - backend1_f1_mean
+    f1_delta_str = f" [{f1_delta:+.3f}]" if abs(f1_delta) > 0.001 else ""
+    
+    backend2_prec_mean, backend2_prec_lower, backend2_prec_upper = backend2_metrics['precision']
+    backend1_prec_mean = backend1_metrics['precision'][0]
+    prec_delta = backend2_prec_mean - backend1_prec_mean
+    prec_delta_str = f" [{prec_delta:+.3f}]" if abs(prec_delta) > 0.001 else ""
+    
+    backend2_rec_mean, backend2_rec_lower, backend2_rec_upper = backend2_metrics['recall']
+    backend1_rec_mean = backend1_metrics['recall'][0]
+    rec_delta = backend2_rec_mean - backend1_rec_mean
+    rec_delta_str = f" [{rec_delta:+.3f}]" if abs(rec_delta) > 0.001 else ""
+    
+    backend2_parse_mean, backend2_parse_lower, backend2_parse_upper = backend2_parse_rate
+    backend1_parse_mean = backend1_parse_rate[0]
+    parse_delta = backend2_parse_mean - backend1_parse_mean
+    parse_delta_str = f" [{parse_delta*100:+.1f}%]" if abs(parse_delta) > 0.001 else ""
+    
+    print(f"  F1:        {format_metric_with_ci(*backend2_metrics['f1'])}{f1_delta_str}")
+    print(f"  Precision: {format_metric_with_ci(*backend2_metrics['precision'])}{prec_delta_str}")
+    print(f"  Recall:    {format_metric_with_ci(*backend2_metrics['recall'])}{rec_delta_str}")
+    print(f"  Parse Rate: {format_metric_with_ci(*backend2_parse_rate, as_percent=True)}{parse_delta_str}")
+    
+    # ========== AGREEMENT BETWEEN BACKENDS ==========
+    print("\n" + "="*70)
+    print("AGREEMENT BETWEEN BACKENDS")
+    print("="*70)
     
     # Binary label agreement
     binary_agreement = df['binary_match'].sum()
@@ -220,10 +335,10 @@ def print_comparison_summary(df: pd.DataFrame):
         print(f"  Disagreements: {total - binary_agreement}")
         # Show breakdown of disagreements
         disagreements = df[~df['binary_match']]
-        api_true = (disagreements['api_binary_label'] == True).sum()
-        local_true = (disagreements['local_binary_label'] == True).sum()
-        print(f"    API=True, LOCAL=False: {api_true}")
-        print(f"    API=False, LOCAL=True: {local_true}")
+        backend1_true = (disagreements['backend1_binary_label'] == True).sum()
+        backend2_true = (disagreements['backend2_binary_label'] == True).sum()
+        print(f"    {backend1_name}=True, {backend2_name}=False: {backend1_true}")
+        print(f"    {backend1_name}=False, {backend2_name}=True: {backend2_true}")
     
     # Fine-grain label agreement
     fine_grain_agreement = df['fine_grain_match'].sum()
@@ -231,13 +346,13 @@ def print_comparison_summary(df: pd.DataFrame):
     print(f"\nFine-grain Label Agreement: {fine_grain_agreement}/{total} ({fine_grain_rate:.1%})")
     
     # Parse success rates
-    api_parsed = df['api_parsed_successfully'].sum()
-    local_parsed = df['local_parsed_successfully'].sum()
+    backend1_parsed = df['backend1_parsed_successfully'].sum()
+    backend2_parsed = df['backend2_parsed_successfully'].sum()
     both_parsed = df['both_parsed'].sum()
     
     print(f"\nParse Success Rates:")
-    print(f"  API: {api_parsed}/{total} ({api_parsed/total:.1%})")
-    print(f"  LOCAL: {local_parsed}/{total} ({local_parsed/total:.1%})")
+    print(f"  {backend1_name}: {backend1_parsed}/{total} ({backend1_parsed/total:.1%})")
+    print(f"  {backend2_name}: {backend2_parsed}/{total} ({backend2_parsed/total:.1%})")
     print(f"  Both: {both_parsed}/{total} ({both_parsed/total:.1%})")
     
     # Text similarities
@@ -250,56 +365,155 @@ def print_comparison_summary(df: pd.DataFrame):
     
     # Response lengths
     print(f"\nResponse Lengths (mean):")
-    print(f"  API: {df['api_response_length'].mean():.0f} chars")
-    print(f"  LOCAL: {df['local_response_length'].mean():.0f} chars")
+    print(f"  {backend1_name}: {df['backend1_response_length'].mean():.0f} chars")
+    print(f"  {backend2_name}: {df['backend2_response_length'].mean():.0f} chars")
     
     print(f"\nReasoning Lengths (mean):")
-    print(f"  API: {df['api_reasoning_length'].mean():.0f} chars")
-    print(f"  LOCAL: {df['local_reasoning_length'].mean():.0f} chars")
+    print(f"  {backend1_name}: {df['backend1_reasoning_length'].mean():.0f} chars")
+    print(f"  {backend2_name}: {df['backend2_reasoning_length'].mean():.0f} chars")
     
-    # Overall assessment
+    # ========== OVERALL ASSESSMENT ==========
     print("\n" + "="*70)
     print("ASSESSMENT")
     print("="*70)
     
-    if binary_rate >= 0.95:
-        print("✅ PASS: Binary labels highly consistent (≥95% agreement)")
-    elif binary_rate >= 0.90:
-        print("⚠️  CAUTION: Binary labels mostly consistent (≥90% agreement)")
+    # Performance comparison
+    print("\nPerformance:")
+    if abs(f1_delta) < 0.01:
+        print(f"  ≈ Similar F1 scores (Δ={f1_delta:+.3f})")
+    elif f1_delta > 0:
+        print(f"  ✓ {backend2_name} performs better (F1 Δ={f1_delta:+.3f})")
     else:
-        print("❌ FAIL: Binary labels inconsistent (<90% agreement)")
+        print(f"  ✓ {backend1_name} performs better (F1 Δ={-f1_delta:+.3f})")
+    
+    # Agreement assessment
+    print("\nAgreement:")
+    if binary_rate >= 0.95:
+        print("  ✅ Binary labels highly consistent (≥95% agreement)")
+    elif binary_rate >= 0.90:
+        print("  ⚠️  Binary labels mostly consistent (≥90% agreement)")
+    else:
+        print("  ❌ Binary labels inconsistent (<90% agreement)")
     
     if avg_response_sim >= 0.8:
-        print("✅ PASS: Response texts highly similar (≥80% similarity)")
+        print("  ✅ Response texts highly similar (≥80% similarity)")
     elif avg_response_sim >= 0.6:
-        print("⚠️  CAUTION: Response texts moderately similar (≥60% similarity)")
+        print("  ⚠️  Response texts moderately similar (≥60% similarity)")
     else:
-        print("❌ FAIL: Response texts differ significantly (<60% similarity)")
+        print("  ❌ Response texts differ significantly (<60% similarity)")
     
     print("\nConclusion:")
     if binary_rate >= 0.95 and avg_response_sim >= 0.8:
-        print("  Both backends produce consistent results. ✓")
-        print("  API correctly applies Harmony format. ✓")
+        print("  Both backends produce highly consistent results. ✓")
+    elif binary_rate >= 0.90:
+        print("  Backends mostly agree, with some differences.")
+        print("  Review detailed results for specific disagreements.")
     else:
         print("  Backends show significant differences.")
         print("  Review detailed results for debugging.")
+
+
+def generate_backend_comparison_table(
+    df: pd.DataFrame,
+    backend1: InferenceBackend,
+    backend2: InferenceBackend,
+    policy: str,
+    model: str,
+    sample_size: int,
+    n_bootstrap: int = 1000,
+) -> str:
+    """Generate HTML table comparing two backends.
+    
+    Args:
+        df: DataFrame with comparison results
+        backend1: First backend
+        backend2: Second backend
+        policy: Policy name
+        model: Model name
+        sample_size: Number of examples compared
+        n_bootstrap: Number of bootstrap iterations for confidence intervals
+        
+    Returns:
+        str: HTML table string
+    """
+    # Backend display names
+    backend1_name = backend1.value.upper().replace('_', ' ')
+    backend2_name = backend2.value.upper().replace('_', ' ')
+    
+    # Prepare data for metrics calculation
+    backend1_pred = df['backend1_binary_label'].fillna(False).astype(int).values
+    backend2_pred = df['backend2_binary_label'].fillna(False).astype(int).values
+    y_true = df['ground_truth'].astype(int).values
+    
+    # Calculate metrics for both backends
+    backend1_metrics = calculate_classification_metrics_with_ci(
+        y_true, backend1_pred, n_bootstrap=n_bootstrap
+    )
+    backend1_parse_rate = calculate_proportion_with_ci(
+        df['backend1_parsed_successfully'].values, n_bootstrap=n_bootstrap
+    )
+    
+    backend2_metrics = calculate_classification_metrics_with_ci(
+        y_true, backend2_pred, n_bootstrap=n_bootstrap
+    )
+    backend2_parse_rate = calculate_proportion_with_ci(
+        df['backend2_parsed_successfully'].values, n_bootstrap=n_bootstrap
+    )
+    
+    # Format metrics
+    def format_metrics_dict(metrics, parse_rate):
+        return {
+            'F1': format_metric_with_ci(*metrics['f1']),
+            'Precision': format_metric_with_ci(*metrics['precision']),
+            'Recall': format_metric_with_ci(*metrics['recall']),
+            'Parse Rate': format_metric_with_ci(*parse_rate, as_percent=True),
+        }
+    
+    # Create table rows
+    rows = [
+        {
+            'Backend': backend1_name,
+            'Metrics': format_metrics_dict(backend1_metrics, backend1_parse_rate),
+        },
+        {
+            'Backend': backend2_name,
+            'Metrics': format_metrics_dict(backend2_metrics, backend2_parse_rate),
+        }
+    ]
+    
+    # Generate HTML table
+    return generate_html_table(rows=rows)
 
 
 @app.command()
 def main(
     sample_size: int = typer.Option(100, help="Number of examples to compare"),
     policy: str = typer.Option('toxic_simple', help="Policy name"),
-    model: str = typer.Option('GPT_OSS_20B', help="Model to use"),
+    model: str = typer.Option('GPT_OSS_safeguarded_20B', help="Model to use"),
+    backend1: str = typer.Option('API', help="First backend (API, API_INJECT_HARMONY, LOCAL, LOCAL_INJECT_HARMONY)"),
+    backend2: str = typer.Option('API_INJECT_HARMONY', help="Second backend (API, API_INJECT_HARMONY, LOCAL, LOCAL_INJECT_HARMONY)"),
     version: str = typer.Option('toxicchat0124', help="Dataset version"),
     split: str = typer.Option('test', help="Dataset split"),
+    n_bootstrap: int = typer.Option(1000, help="Number of bootstrap iterations for confidence intervals"),
 ):
-    """Run backend comparison and generate report."""
+    """Run backend comparison and generate report.
+    
+    Example:
+        python -m workspace.compare_backends --backend1 API --backend2 API_INJECT_HARMONY --sample-size 100
+    """
+    # Convert string backend names to enum
+    backend1_enum = InferenceBackend[backend1]
+    backend2_enum = InferenceBackend[backend2]
+    
     run_backend_comparison(
         sample_size=sample_size,
         policy=policy,
         model=model,
+        backend1=backend1_enum,
+        backend2=backend2_enum,
         version=version,
         split=split,
+        n_bootstrap=n_bootstrap,
     )
 
 

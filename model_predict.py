@@ -1,11 +1,21 @@
 from dataclasses import dataclass
+from tqdm import tqdm
+import re
+from openai_harmony import (
+    DeveloperContent,
+    HarmonyEncodingName,
+    Message,
+    Role,
+    SystemContent,
+    load_harmony_encoding,
+)
 import hashlib
 import json
 from pathlib import Path
 from huggingface_hub import InferenceClient
 from enum import StrEnum
 import diskcache
-from typing import Optional, Union, List
+from typing import Literal, Optional, Union, List
 
 # Default batch size for LOCAL backend inference
 DEFAULT_BATCH_SIZE = 8
@@ -17,8 +27,10 @@ class Model(StrEnum):
 
 class InferenceBackend(StrEnum):
     """Backend for model inference."""
-    API = "api"          # Hugging Face Inference API (default)
-    LOCAL = "local"      # Local transformers with apply_chat_template
+    API = "api"          # Hugging Face Inference API with standard messages
+    API_INJECT_HARMONY = "api_inject_harmony"  # HF API with manually injected Harmony encoding
+    LOCAL = "local"      # Local transformers with standard messages
+    LOCAL_INJECT_HARMONY = "local_inject_harmony"  # Local with manually injected Harmony encoding
 
 
 # Cache directory for storing responses
@@ -184,7 +196,7 @@ def clear_cache_by_backend(backend: InferenceBackend = None):
 
 def _build_messages(prompt: str, system_prompt: Optional[str] = None) -> list[dict]:
     """
-    Build messages list for chat completion.
+    Build messages list for chat completion (standard format).
     
     Args:
         prompt: User prompt
@@ -200,12 +212,40 @@ def _build_messages(prompt: str, system_prompt: Optional[str] = None) -> list[di
     return messages
 
 
+def _build_messages_harmony(
+    prompt: str, 
+    developer_content: str = None,
+    reasoning_effort: Literal["Low", "Medium", "High"] = "Medium"
+) -> list[dict]:
+    enc = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+    system_content = SystemContent.new().with_reasoning_effort(reasoning_effort)
+    conv_messages = [
+        Message.from_role_and_content(Role.SYSTEM, system_content),
+        Message.from_role_and_content(
+            Role.DEVELOPER,
+            DeveloperContent.new().with_instructions(developer_content),
+        ),
+        Message.from_role_and_content(Role.USER, prompt),
+    ]
+    messages = []
+    for pre_msg in conv_messages:
+        tokens = enc.render(pre_msg)
+        prompt = enc.decode(tokens)
+        messages.append({
+            "role": re.search(r"<\|start\|>(.*?)<\|message\|>", prompt).group(1),
+            "content": re.search(r"<\|message\|>(.*?)<\|end\|>", prompt, re.DOTALL).group(1),
+        })
+    print(messages)
+    return messages
+
+
 def _get_local_model_response(
     model: Model,
     prompt: str,
     system_prompt: Optional[str] = None,
     temperature: float = 0.0,
     max_tokens: int = 8192,
+    backend: InferenceBackend = InferenceBackend.LOCAL,
 ) -> ModelResponse:
     """
     Get model response using local transformers pipeline.
@@ -216,8 +256,11 @@ def _get_local_model_response(
     model_cache = LocalModelCache()
     generator = model_cache.get_pipeline(str(model))
     
-    # Build messages
-    messages = _build_messages(prompt, system_prompt)
+    # Build messages (with or without Harmony encoding)
+    if backend == InferenceBackend.LOCAL_INJECT_HARMONY:
+        messages = _build_messages_harmony(prompt, system_prompt)
+    else:
+        messages = _build_messages(prompt, system_prompt)
     
     # Generate response using pipeline
     result = generator(
@@ -287,13 +330,17 @@ def _get_local_model_response_batch(
     model_cache = LocalModelCache()
     generator = model_cache.get_pipeline(str(model))
 
-    # Build messages for all prompts
-    messages_batch = [_build_messages(prompt, system_prompt) for prompt in prompts]
+    # Build messages for all prompts (with or without Harmony encoding)
+    if backend == InferenceBackend.LOCAL_INJECT_HARMONY:
+        messages_batch = [_build_messages_harmony(prompt, system_prompt) for prompt in prompts]
+    else:
+        messages_batch = [_build_messages(prompt, system_prompt) for prompt in prompts]
 
     # Chunk size: 4x the batch_size for good balance between progress visibility and overhead
     chunk_size = max(batch_size * 4, 1)
     
-    print(f"Running LOCAL inference on {len(prompts)} prompts (batch_size={batch_size}, chunk_size={chunk_size})...")
+    backend_desc = "LOCAL+Harmony" if backend == InferenceBackend.LOCAL_INJECT_HARMONY else "LOCAL"
+    print(f"Running {backend_desc} inference on {len(prompts)} prompts (batch_size={batch_size}, chunk_size={chunk_size})...")
     
     # Process in chunks to get real-time progress updates and cache each chunk
     all_model_responses = []
@@ -313,12 +360,12 @@ def _get_local_model_response_batch(
             
             # Parse results from this chunk into ModelResponse objects
             chunk_model_responses = []
-            for prompt, result in zip(chunk_prompts, chunk_results):
+            for prompt, result, messages in zip(chunk_prompts, chunk_results, chunk_messages):
                 # Extract the generated text
                 generated_text = result[0]["generated_text"]
 
                 # The last message in generated_text should be the assistant's response
-                if isinstance(generated_text, list) and len(generated_text) > len(_build_messages(prompt, system_prompt)):
+                if isinstance(generated_text, list) and len(generated_text) > len(messages):
                     assistant_message = generated_text[-1]
                     content = assistant_message.get("content", "")
                 else:
@@ -356,34 +403,13 @@ def _get_local_model_response_batch(
 def get_model_response(
     model: Model,
     prompt: Union[str, List[str]],
-    system_prompt: str = None,
+    instructions: str = None,
     temperature: float = 0.0,
     max_tokens: int = 8192,
     use_cache: bool = True,
-    backend: InferenceBackend = InferenceBackend.API,
+    backend: InferenceBackend = InferenceBackend.API_INJECT_HARMONY,
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> Union[ModelResponse, List[ModelResponse]]:
-    """
-    Get model response using specified backend.
-
-    Accepts either a single prompt or a list of prompts.
-    For LOCAL backend with batched prompts, uses efficient batching with cache filtering.
-
-    Args:
-        model: Model to use
-        prompt: User prompt (single string or list of strings)
-        system_prompt: Optional system prompt
-        temperature: Sampling temperature (0.0 for deterministic)
-        max_tokens: Maximum tokens to generate
-        use_cache: Whether to use disk cache
-        backend: Inference backend (API or LOCAL)
-        batch_size: Batch size for LOCAL backend (pipeline's internal batching)
-
-    Returns:
-        ModelResponse (single) or List[ModelResponse] (batch)
-    """
-    from tqdm import tqdm
-
     # Detect if batch or single
     is_batch = isinstance(prompt, list)
     prompts = prompt if is_batch else [prompt]
@@ -391,7 +417,7 @@ def get_model_response(
 
     # Step 1: Check cache for all prompts
     cache_keys = [
-        _get_cache_key(model, p, system_prompt, temperature, max_tokens, backend)
+        _get_cache_key(model, p, instructions, temperature, max_tokens, backend)
         for p in prompts
     ]
     cached_results = [cache.get(key) if use_cache else None for key in cache_keys]
@@ -403,15 +429,20 @@ def get_model_response(
     if is_batch and miss_prompts:
         print(f"Cache: {n - len(miss_indices)} hits, {len(miss_indices)} misses")
 
+    if backend == InferenceBackend.LOCAL_INJECT_HARMONY:
+        raise NotImplementedError("LOCAL is not supported yet")
+
     # Step 3: Get responses for cache misses
     miss_responses = []
     if miss_prompts:
-        if backend == InferenceBackend.LOCAL and len(miss_prompts) > 1:
+        is_local_batch = backend in (InferenceBackend.LOCAL, InferenceBackend.LOCAL_INJECT_HARMONY) and len(miss_prompts) > 1
+
+        if is_local_batch:
             # Batch inference for LOCAL backend - caches each chunk internally
             miss_responses = _get_local_model_response_batch(
                 model=model,
                 prompts=miss_prompts,
-                system_prompt=system_prompt,
+                system_prompt=instructions,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 batch_size=batch_size,
@@ -420,19 +451,28 @@ def get_model_response(
             )
         else:
             # Sequential processing for API backend or single miss
-            desc = "API inference" if backend == InferenceBackend.API else "LOCAL inference"
+            is_local = backend in (InferenceBackend.LOCAL, InferenceBackend.LOCAL_INJECT_HARMONY)
+            desc = "LOCAL inference" if is_local else "API inference"
             for miss_prompt in tqdm(miss_prompts, desc=desc, disable=len(miss_prompts) == 1):
-                if backend == InferenceBackend.LOCAL:
+                if is_local:
                     response = _get_local_model_response(
                         model=model,
                         prompt=miss_prompt,
-                        system_prompt=system_prompt,
+                        system_prompt=instructions,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        backend=backend,
                     )
-                else:  # API backend
+                else:  # API backend (standard or with injected harmony)
                     client = InferenceClient()
-                    messages = _build_messages(miss_prompt, system_prompt)
+                    
+                    # Choose message builder based on backend
+                    if backend == InferenceBackend.API_INJECT_HARMONY:
+                        messages = _build_messages_harmony(
+                            miss_prompt, developer_content=instructions)
+                    else:
+                        messages = _build_messages(
+                            miss_prompt, system_prompt=instructions)
 
                     params = {}
                     if temperature is not None:
@@ -450,7 +490,7 @@ def get_model_response(
                         reasoning=getattr(completion.choices[0].message, 'reasoning', None) or "",
                         model=model,
                         prompt=miss_prompt,
-                        system_prompt=system_prompt,
+                        system_prompt=instructions,
                     )
 
                 miss_responses.append(response)

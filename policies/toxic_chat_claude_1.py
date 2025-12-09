@@ -39,6 +39,7 @@ def parse(response: ModelResponse) -> ClassificationResult:
     return ClassificationResult(
         binary_label=binary_label,
         fine_grain_label=fine_grain,
+        float_label=1.0 if binary_label else 0.0,
         metadata=metadata,
         model_response=response,
         parsed_successfully=parsed_successfully
